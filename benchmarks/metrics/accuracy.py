@@ -59,6 +59,8 @@ def compute_accuracy_metrics(
     parseable = sum(1 for r in results if r["is_parseable"])
     unparseable = total - parseable
     correct = sum(1 for r in results if r["is_correct"])
+    incorrect_parseable = parseable - correct
+    incorrect = total - correct
 
     # Per-subject
     by_subject: dict[str, dict[str, int]] = defaultdict(
@@ -89,7 +91,8 @@ def compute_accuracy_metrics(
         "parseable_samples": parseable,
         "unparseable_samples": unparseable,
         "correct": correct,
-        "incorrect": parseable - correct,
+        "incorrect": incorrect,
+        "incorrect_parseable": incorrect_parseable,
         "overall_accuracy": round(overall_accuracy, 4),
         "per_subject": per_subject,
     }

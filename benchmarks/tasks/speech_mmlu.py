@@ -37,6 +37,41 @@ DEFAULT_PROMPT = (
 )
 
 
+def _extract_text_content(content: Any) -> str:
+    """Normalize chat message content into plain text."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    text_parts.append(text_value)
+        return "".join(text_parts).strip()
+    return ""
+
+
+def _extract_message_text(message: dict[str, Any]) -> str:
+    """Extract text from a chat-completions message.
+
+    In text+audio mode, some adapters may only populate the audio transcript.
+    We use it as a fallback so answer parsing still works.
+    """
+    text = _extract_text_content(message.get("content"))
+    if text:
+        return text
+
+    audio_obj = message.get("audio")
+    if isinstance(audio_obj, dict):
+        transcript = audio_obj.get("transcript")
+        if isinstance(transcript, str):
+            return transcript.strip()
+    return ""
+
+
 @dataclass
 class SpeechMmluResult:
     sample_id: str = ""
@@ -102,9 +137,7 @@ def make_speech_mmlu_send_fn(
                 return result
 
             message = choices[0].get("message", {})
-            content = message.get("content", "")
-            result.text = content
-            result.is_success = True
+            result.text = _extract_message_text(message)
 
             usage = resp_json.get("usage", {})
             result.prompt_tokens = usage.get("prompt_tokens", 0)
@@ -124,11 +157,25 @@ def make_speech_mmlu_send_fn(
                             with open(wav_path, "wb") as f:
                                 f.write(wav_bytes)
                             result.wav_path = wav_path
+                        result.is_success = True
+                    else:
+                        result.error = f"Invalid audio payload ({len(wav_bytes)} bytes)"
+                else:
+                    result.error = "No audio in response"
+            elif result.text:
+                result.is_success = True
+            else:
+                result.error = "Empty text response"
 
         except (aiohttp.ClientError, Exception) as exc:
             result.error = str(exc)
         finally:
             result.latency_s = time.perf_counter() - start_time
+            result.engine_time_s = result.latency_s
+            if result.audio_duration_s > 0:
+                result.rtf = result.latency_s / result.audio_duration_s
+            if result.completion_tokens > 0 and result.engine_time_s > 0:
+                result.tok_per_s = result.completion_tokens / result.engine_time_s
 
         return result
 
@@ -162,7 +209,7 @@ def build_speech_mmlu_results(
             error=rr.error,
         )
 
-        if rr.is_success and rr.text:
+        if rr.text:
             pred = extract_answer_letter(rr.text)
             if pred is not None:
                 smr.predicted_answer = pred
@@ -204,10 +251,18 @@ def print_speech_mmlu_summary(
     print("=" * 60)
 
     if speed_metrics:
+        print(f"\n  Completed reqs:   {speed_metrics.get('completed_requests', 0)}")
+        print(f"  Failed reqs:      {speed_metrics.get('failed_requests', 0)}")
         print(f"\n  Latency mean:     {speed_metrics.get('latency_mean_s', 0):.3f}s")
         print(f"  Latency p95:      {speed_metrics.get('latency_p95_s', 0):.3f}s")
+        if speed_metrics.get("audio_duration_mean_s", 0) > 0:
+            print(
+                f"  Audio mean:       {speed_metrics.get('audio_duration_mean_s', 0):.3f}s"
+            )
+        if speed_metrics.get("rtf_mean") is not None:
+            print(f"  RTF mean:         {speed_metrics.get('rtf_mean', 0):.4f}")
         print(
-            f"  Throughput:       {speed_metrics.get('throughput_rps', 0):.2f} req/s"
+            f"  Throughput:       {speed_metrics.get('throughput_qps', 0):.2f} req/s"
         )
         print("=" * 60)
     print()
