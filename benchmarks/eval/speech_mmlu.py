@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.benchmarker.runner import BenchmarkRunner, RunConfig
 from benchmarks.benchmarker.utils import wait_for_service
-from benchmarks.dataset.speech_mmlu import load_speech_mmlu_samples
+from benchmarks.dataset.speech_mmlu import DEFAULT_CACHE_DIR, load_speech_mmlu_samples
 from benchmarks.metrics.accuracy import compute_accuracy_metrics
 from benchmarks.metrics.performance import compute_speed_metrics
 from benchmarks.tasks.speech_mmlu import (
@@ -62,7 +62,7 @@ class SpeechMmluBenchmarkConfig:
     host: str = "localhost"
     port: int = 8000
     modalities: list[str] = field(default_factory=lambda: ["text"])
-    cache_dir: str = "benchmarks/cache/speech_mmlu"
+    cache_dir: str = DEFAULT_CACHE_DIR
     output_dir: str = "results/speech_mmlu"
     max_samples: int | None = None
     subjects: list[str] | None = None
@@ -261,8 +261,8 @@ def main() -> None:
     parser.add_argument(
         "--cache-dir",
         type=str,
-        default="benchmarks/cache/speech_mmlu",
-        help="Directory for cached dataset files.",
+        default=DEFAULT_CACHE_DIR,
+        help="Hugging Face cache directory for dataset files.",
     )
     parser.add_argument("--max-samples", type=int, default=None, help="Max samples.")
     parser.add_argument(
