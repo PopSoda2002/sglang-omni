@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Accuracy metrics for multiple-choice evaluation (e.g. Speech MMLU)."""
+"""Accuracy metrics for multiple-choice evaluation (e.g. MMSU)."""
 
 from __future__ import annotations
 
