@@ -45,57 +45,6 @@ class BenchmarkRunner:
         self.config = config
         self.wall_clock_s: float = 0.0
 
-    @staticmethod
-    def _sample_request_id(sample: Any) -> str:
-        getter = sample.get if isinstance(sample, dict) else lambda key: getattr(sample, key, None)
-        for key in ("sample_id", "request_id", "id"):
-            value = getter(key)
-            if value is not None:
-                return str(value)
-        return ""
-
-    def _error_result(self, sample: Any, error: Any) -> RequestResult:
-        return RequestResult(
-            request_id=self._sample_request_id(sample),
-            error=str(error),
-        )
-
-    @staticmethod
-    def _finalize_result(result: RequestResult, elapsed_s: float) -> RequestResult:
-        if result.latency_s <= 0:
-            result.latency_s = elapsed_s
-        if result.engine_time_s <= 0:
-            result.engine_time_s = result.latency_s
-        if result.audio_duration_s > 0 and result.rtf <= 0:
-            result.rtf = result.latency_s / result.audio_duration_s
-        if result.completion_tokens > 0 and result.engine_time_s > 0 and result.tok_per_s <= 0:
-            result.tok_per_s = result.completion_tokens / result.engine_time_s
-        return result
-
-    async def _invoke_send_fn(
-        self,
-        session: aiohttp.ClientSession,
-        sample: Any,
-        send_fn: SendFn,
-    ) -> RequestResult:
-        started_at = time.perf_counter()
-        outcome = (
-            await asyncio.gather(send_fn(session, sample), return_exceptions=True)
-        )[0]
-
-        if isinstance(outcome, RequestResult):
-            result = outcome
-        elif isinstance(outcome, BaseException):
-            result = self._error_result(sample, outcome)
-        else:
-            result = self._error_result(
-                sample,
-                f"Unexpected send_fn result: {type(outcome).__name__}",
-            )
-
-        elapsed_s = time.perf_counter() - started_at
-        return self._finalize_result(result, elapsed_s)
-
     async def run(self, samples: list, send_fn: SendFn) -> list[RequestResult]:
         timeout = aiohttp.ClientTimeout(total=self.config.timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -121,7 +70,7 @@ class BenchmarkRunner:
         count = min(self.config.warmup, len(samples))
         logger.info("Warmup (%d requests)...", count)
         for i in range(count):
-            result = await self._invoke_send_fn(session, samples[i], send_fn)
+            result = await send_fn(session, samples[i])
             status = "ok" if result.is_success else result.error
             logger.info("  warmup %d/%d: %s", i + 1, count, status)
 
@@ -136,17 +85,18 @@ class BenchmarkRunner:
             if self.config.max_concurrency
             else None
         )
-        with tqdm(total=len(samples), disable=self.config.disable_tqdm) as pbar:
+        pbar = tqdm(total=len(samples), disable=self.config.disable_tqdm)
 
-            async def _limited(sample: Any) -> RequestResult:
-                if semaphore:
-                    async with semaphore:
-                        result = await self._invoke_send_fn(session, sample, send_fn)
-                else:
-                    result = await self._invoke_send_fn(session, sample, send_fn)
-                pbar.update(1)
-                return result
+        async def _limited(sample: Any) -> RequestResult:
+            if semaphore:
+                async with semaphore:
+                    result = await send_fn(session, sample)
+            else:
+                result = await send_fn(session, sample)
+            pbar.update(1)
+            return result
 
+        try:
             tasks: list[asyncio.Task] = []
             for sample in samples:
                 if self.config.request_rate != float("inf"):
@@ -155,4 +105,6 @@ class BenchmarkRunner:
                 tasks.append(asyncio.create_task(_limited(sample)))
 
             results: list[RequestResult] = list(await asyncio.gather(*tasks))
+        finally:
+            pbar.close()
         return results
