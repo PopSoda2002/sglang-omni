@@ -64,7 +64,8 @@ def load_mmsu_samples(
         if cat_set and row["category"] not in cat_set:
             continue
         choices = [
-            str(row[k]).strip() for k in ("choice_a", "choice_b", "choice_c", "choice_d")
+            str(row[k]).strip()
+            for k in ("choice_a", "choice_b", "choice_c", "choice_d")
         ]
         answer = str(row["answer_gt"]).strip()
         sid = str(row["id"])
@@ -80,7 +81,9 @@ def load_mmsu_samples(
                 category=row["category"],
                 sub_category=str(row["sub-category"]).strip(),
                 sub_sub_category=str(row["sub-sub-category"]).strip(),
-                linguistics_sub_discipline=str(row["linguistics_sub_discipline"]).strip(),
+                linguistics_sub_discipline=str(
+                    row["linguistics_sub_discipline"]
+                ).strip(),
             )
         )
 
