@@ -51,26 +51,6 @@ python benchmarks/eval/voice_clone_tts_wer.py \
     --output-dir results/s2pro_en_c20 --lang en --max-samples 50 \
     --generation-concurrency 20
 
-# 3a. MMSU: audio-in -> text-out accuracy
-python benchmarks/eval/mmsu.py \
-    --repo-dir /path/to/MMSU \
-    --model qwen3-omni --port 8000 \
-    --modalities text --max-samples 100
-
-# 3b. MMSU: audio-in -> text+audio-out
-python benchmarks/eval/mmsu.py \
-    --repo-dir /path/to/MMSU \
-    --model qwen3-omni --port 8000 \
-    --modalities text+audio --max-samples 100 --save-audio
-
-# 3c. MMSU: filter by task/category
-python benchmarks/eval/mmsu.py \
-    --repo-dir /path/to/MMSU \
-    --model qwen3-omni --port 8000 \
-    --task-names accent_identification,emotion_recognition \
-    --categories Perception --max-samples 50
-```
-
 ## Eval Scripts
 
 | Script | Task | Model | API |
