@@ -8,7 +8,6 @@ import csv
 import json
 import os
 import re
-import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -92,6 +91,82 @@ def _extract_prediction(
     return None, ""
 
 
+def _build_request_payload(
+    sample: MmsuSample,
+    *,
+    model_name: str,
+    prompt: str,
+    modalities: list[str],
+    max_tokens: int,
+    temperature: float,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": _build_question_text(sample, prompt),
+            }
+        ],
+        "audios": [sample.audio_path],
+        "modalities": modalities,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if "audio" in modalities:
+        payload["audio"] = {"format": "wav"}
+    return payload
+
+
+def _save_response_audio(
+    wav_bytes: bytes,
+    sample_id: str,
+    save_audio_dir: str | None,
+) -> str:
+    if not save_audio_dir or len(wav_bytes) <= 44:
+        return ""
+
+    wav_path = os.path.join(save_audio_dir, f"{sample_id}.wav")
+    with open(wav_path, "wb") as file_obj:
+        file_obj.write(wav_bytes)
+    return wav_path
+
+
+def _build_result_from_response(
+    result: RequestResult,
+    response_json: dict[str, Any],
+    *,
+    audio_mode: bool,
+    sample_id: str,
+    save_audio_dir: str | None,
+) -> RequestResult:
+    message = response_json.get("choices", [{}])[0].get("message", {})
+    result.text = _extract_message_text(message)
+
+    usage = response_json.get("usage", {})
+    result.prompt_tokens = usage.get("prompt_tokens", 0)
+    result.completion_tokens = usage.get("completion_tokens", 0)
+
+    if not audio_mode:
+        if result.text:
+            result.is_success = True
+        else:
+            result.error = "Empty response"
+        return result
+
+    audio_obj = message.get("audio")
+    if not isinstance(audio_obj, dict) or not audio_obj.get("data"):
+        result.error = "No audio in response"
+        return result
+
+    wav_bytes = base64.b64decode(audio_obj["data"])
+    result.audio_duration_s = get_wav_duration(wav_bytes)
+    result.wav_path = _save_response_audio(wav_bytes, sample_id, save_audio_dir)
+    result.is_success = bool(result.text or result.audio_duration_s > 0)
+    return result
+
+
 def _build_group_metrics(
     results: list["MmsuResult"],
     key: str,
@@ -158,69 +233,30 @@ def make_mmsu_send_fn(
         session: aiohttp.ClientSession,
         sample: MmsuSample,
     ) -> RequestResult:
-        result = RequestResult(request_id=sample.sample_id)
-        start_time = time.perf_counter()
-        payload: dict[str, Any] = {
-            "model": model_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": _build_question_text(sample, prompt),
-                }
-            ],
-            "audios": [sample.audio_path],
-            "modalities": modalities,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        }
-        if audio_mode:
-            payload["audio"] = {"format": "wav"}
+        payload = _build_request_payload(
+            sample,
+            model_name=model_name,
+            prompt=prompt,
+            modalities=modalities,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
-        try:
-            async with session.post(
-                api_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as response:
-                response.raise_for_status()
-                response_json = await response.json()
+        async with session.post(
+            api_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        ) as response:
+            response.raise_for_status()
+            response_json = await response.json()
 
-            message = response_json.get("choices", [{}])[0].get("message", {})
-            result.text = _extract_message_text(message)
-
-            usage = response_json.get("usage", {})
-            result.prompt_tokens = usage.get("prompt_tokens", 0)
-            result.completion_tokens = usage.get("completion_tokens", 0)
-
-            if audio_mode:
-                audio_obj = message.get("audio")
-                if isinstance(audio_obj, dict) and audio_obj.get("data"):
-                    wav_bytes = base64.b64decode(audio_obj["data"])
-                    result.audio_duration_s = get_wav_duration(wav_bytes)
-                    if save_audio_dir and len(wav_bytes) > 44:
-                        wav_path = os.path.join(save_audio_dir, f"{sample.sample_id}.wav")
-                        with open(wav_path, "wb") as file_obj:
-                            file_obj.write(wav_bytes)
-                        result.wav_path = wav_path
-                    result.is_success = bool(result.text or result.audio_duration_s > 0)
-                else:
-                    result.error = "No audio in response"
-            elif result.text:
-                result.is_success = True
-            else:
-                result.error = "Empty response"
-        except (aiohttp.ClientError, Exception) as exc:
-            result.error = str(exc)
-        finally:
-            result.latency_s = time.perf_counter() - start_time
-            result.engine_time_s = result.latency_s
-            if result.audio_duration_s > 0:
-                result.rtf = result.latency_s / result.audio_duration_s
-            if result.completion_tokens > 0 and result.engine_time_s > 0:
-                result.tok_per_s = result.completion_tokens / result.engine_time_s
-
-        return result
+        return _build_result_from_response(
+            RequestResult(request_id=sample.sample_id),
+            response_json,
+            audio_mode=audio_mode,
+            sample_id=sample.sample_id,
+            save_audio_dir=save_audio_dir,
+        )
 
     return send_fn
 
