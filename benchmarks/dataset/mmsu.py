@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Dataset loader for MMSU."""
+"""Dataset loader for MMSU (audio multiple-choice benchmark)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+AUDIO_CACHE_DIR = Path("/tmp/mmsu_audio")
 
 
 @dataclass
@@ -25,129 +26,65 @@ class MmsuSample:
     linguistics_sub_discipline: str
 
 
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", text.lower())).strip()
-
-
-def _guess_audio_suffix(audio_bytes: bytes) -> str:
-    if audio_bytes.startswith(b"RIFF") and audio_bytes[8:12] == b"WAVE":
-        return ".wav"
-    if audio_bytes.startswith(b"fLaC"):
-        return ".flac"
-    if audio_bytes.startswith(b"OggS"):
-        return ".ogg"
-    if audio_bytes.startswith(b"ID3") or audio_bytes[:2] in {
-        b"\xff\xfb",
-        b"\xff\xf3",
-        b"\xff\xf2",
-    }:
-        return ".mp3"
-    return ".wav"
-
-
-def _materialize_audio_path(
-    audio_value: Any,
-    repo_dir: Path,
-    sample_id: str,
-) -> str:
-    if isinstance(audio_value, str):
-        audio_path = Path(audio_value)
-        return str(
-            audio_path.resolve()
-            if audio_path.is_absolute()
-            else (repo_dir / audio_path).resolve()
-        )
-
-    if isinstance(audio_value, dict):
-        path_value = audio_value.get("path")
-        if isinstance(path_value, str) and path_value:
-            audio_path = Path(path_value)
-            return str(
-                audio_path.resolve()
-                if audio_path.is_absolute()
-                else (repo_dir / audio_path).resolve()
-            )
-
-        audio_bytes = audio_value.get("bytes")
-        if isinstance(audio_bytes, (bytes, bytearray)):
-            cache_dir = repo_dir / ".mmsu_audio"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            suffix = (
-                Path(path_value).suffix
-                if isinstance(path_value, str) and Path(path_value).suffix
-                else _guess_audio_suffix(bytes(audio_bytes))
-            )
-            audio_path = cache_dir / f"{sample_id}{suffix}"
-            if not audio_path.exists():
-                with open(audio_path, "wb") as file_obj:
-                    file_obj.write(audio_bytes)
-            return str(audio_path.resolve())
-
-    return str(audio_value)
-
-
-def _answer_index(choices: list[str], answer_text: str) -> int | None:
-    normalized_answer = _normalize_text(answer_text)
-    for index, choice in enumerate(choices):
-        if _normalize_text(choice) == normalized_answer:
-            return index
+def _match_answer(choices: list[str], answer: str) -> int | None:
+    norm = re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", answer.lower())).strip()
+    for i, c in enumerate(choices):
+        if re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", c.lower())).strip() == norm:
+            return i
     return None
 
 
+def _dump_audio(sample_id: str, audio_bytes: bytes) -> str:
+    """Write audio bytes to cache and return the path."""
+    AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = AUDIO_CACHE_DIR / f"{sample_id}.mp3"
+    if not path.exists():
+        path.write_bytes(audio_bytes)
+    return str(path)
+
+
 def load_mmsu_samples(
-    repo_dir: str,
     max_samples: int | None = None,
     task_names: list[str] | None = None,
     categories: list[str] | None = None,
     seed: int | None = None,
 ) -> list[MmsuSample]:
+    """Load MMSU samples from HuggingFace dataset ``ddwang2000/MMSU``."""
     from datasets import Audio, load_dataset
 
-    repo_path = Path(repo_dir).expanduser().resolve()
-    parquet_files = sorted(str(path) for path in repo_path.rglob("*.parquet"))
-    dataset = load_dataset("parquet", data_files=parquet_files, split="train")
-    dataset = dataset.cast_column("audio", Audio(decode=False))
+    ds = load_dataset("ddwang2000/MMSU")
+    ds = ds.cast_column("audio", Audio(decode=False))
+    task_set = {t.strip() for t in (task_names or []) if t.strip()} or None
+    cat_set = {c.strip() for c in (categories or []) if c.strip()} or None
 
     samples: list[MmsuSample] = []
-    task_name_filter = {name.strip() for name in task_names or [] if name.strip()}
-    category_filter = {name.strip() for name in categories or [] if name.strip()}
-
-    for row in dataset:
-        task_name = row["task_name"]
-        category = row["category"]
-        if task_name_filter and task_name not in task_name_filter:
+    for row in ds["train"]:
+        if task_set and row["task_name"] not in task_set:
             continue
-        if category_filter and category not in category_filter:
+        if cat_set and row["category"] not in cat_set:
             continue
-
         choices = [
-            str(row["choice_a"]).strip(),
-            str(row["choice_b"]).strip(),
-            str(row["choice_c"]).strip(),
-            str(row["choice_d"]).strip(),
+            str(row[k]).strip() for k in ("choice_a", "choice_b", "choice_c", "choice_d")
         ]
-        answer_text = str(row["answer_gt"]).strip()
-        sample_id = str(row["id"])
+        answer = str(row["answer_gt"]).strip()
+        sid = str(row["id"])
         samples.append(
             MmsuSample(
-                sample_id=sample_id,
-                audio_path=_materialize_audio_path(row["audio"], repo_path, sample_id),
+                sample_id=sid,
+                audio_path=_dump_audio(sid, row["audio"]["bytes"]),
                 question=str(row["question"]).strip(),
                 choices=choices,
-                answer_text=answer_text,
-                answer_index=_answer_index(choices, answer_text),
-                task_name=task_name,
-                category=category,
+                answer_text=answer,
+                answer_index=_match_answer(choices, answer),
+                task_name=row["task_name"],
+                category=row["category"],
                 sub_category=str(row["sub-category"]).strip(),
                 sub_sub_category=str(row["sub-sub-category"]).strip(),
-                linguistics_sub_discipline=str(
-                    row["linguistics_sub_discipline"]
-                ).strip(),
+                linguistics_sub_discipline=str(row["linguistics_sub_discipline"]).strip(),
             )
         )
 
     if seed is not None and len(samples) > 1:
-        samples = samples.copy()
         random.Random(seed).shuffle(samples)
     if max_samples is not None:
         samples = samples[:max_samples]
