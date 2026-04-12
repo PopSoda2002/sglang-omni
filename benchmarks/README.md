@@ -7,8 +7,8 @@ and accuracy (WER) across supported modality combinations.
 
 ```
 benchmarks/
-├── tasks/          # Task definitions (voice_clone, tts_speed, mmsu)
-├── metrics/        # Atomic evaluation tools (wer, performance, accuracy)
+├── tasks/          # Task definitions (voice_clone, tts_speed)
+├── metrics/        # Atomic evaluation tools (wer, performance)
 ├── dataset/        # Dataset loaders + download helpers
 ├── benchmarker/    # Framework: runner, data structures, utilities
 ├── eval/           # Entry-point scripts (one per task x model)
@@ -50,6 +50,7 @@ python benchmarks/eval/voice_clone_tts_wer.py \
     --meta seedtts_testset/en/meta.lst \
     --output-dir results/s2pro_en_c20 --lang en --max-samples 50 \
     --generation-concurrency 20
+```
 
 ## Eval Scripts
 
