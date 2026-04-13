@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-AUDIO_CACHE_DIR = Path(tempfile.mkdtemp(prefix="mmsu_audio_"))
+_audio_cache_dir: Path | None = None
 
 
 @dataclass
@@ -42,8 +42,10 @@ def _match_answer(choices: list[str], answer: str) -> int | None:
 
 def _dump_audio(sample_id: str, audio_bytes: bytes) -> str:
     """Write audio bytes to cache and return the path."""
-    AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = AUDIO_CACHE_DIR / f"{sample_id}.mp3"
+    global _audio_cache_dir
+    if _audio_cache_dir is None:
+        _audio_cache_dir = Path(tempfile.mkdtemp(prefix="mmsu_audio_"))
+    path = _audio_cache_dir / f"{sample_id}.mp3"
     if not path.exists():
         path.write_bytes(audio_bytes)
     return str(path)

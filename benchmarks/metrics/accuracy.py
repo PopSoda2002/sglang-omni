@@ -16,8 +16,6 @@ _PATTERNS = [
     re.compile(r"(?:answer|choice)\s*(?:is|:)\s*([A-D])\b", re.IGNORECASE),
     # "Option B" / "option B"
     re.compile(r"option\s+([A-D])\b", re.IGNORECASE),
-    # Entire response is a single letter
-    re.compile(r"^\s*([A-D])\s*$", re.IGNORECASE),
 ]
 
 

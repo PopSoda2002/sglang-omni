@@ -58,10 +58,7 @@ def _extract_prediction(
         normalized_choice = normalize_text(choice)
         if not normalized_choice:
             continue
-        if (
-            normalized_response == normalized_choice
-            or normalized_choice in normalized_response
-        ):
+        if normalized_response == normalized_choice:
             return index, choice
 
     return None, ""
