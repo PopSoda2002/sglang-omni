@@ -10,8 +10,8 @@ INDEX_TO_LETTER = {v: k for k, v in ANSWER_LETTERS.items()}
 
 # Patterns tried in order: first match wins
 _PATTERNS = [
-    # Bare letter at start: "B", "B.", "B) ..."
-    re.compile(r"^\s*([A-D])\b", re.IGNORECASE),
+    # Bare letter at start: "B", "B.", "B) ..." (not start of a word like "Because")
+    re.compile(r"^\s*([A-D])(?!\w)(?!\s+[a-z])", re.IGNORECASE),
     # "The answer is B" / "answer: B"
     re.compile(r"(?:answer|choice)\s*(?:is|:)\s*([A-D])\b", re.IGNORECASE),
     # "Option B" / "option B"
