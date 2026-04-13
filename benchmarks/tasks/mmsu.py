@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import csv
 import json
 import os
-import re
+import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -16,8 +17,8 @@ import aiohttp
 
 from benchmarks.benchmarker.data import RequestResult
 from benchmarks.benchmarker.runner import SendFn
-from benchmarks.benchmarker.utils import get_wav_duration
-from benchmarks.dataset.mmsu import MmsuSample
+from benchmarks.benchmarker.utils import get_wav_duration, save_json_results
+from benchmarks.dataset.mmsu import MmsuSample, normalize_text
 from benchmarks.metrics.accuracy import INDEX_TO_LETTER, extract_answer_letter
 
 DEFAULT_PROMPT = (
@@ -26,47 +27,22 @@ DEFAULT_PROMPT = (
 )
 
 
-def _extract_text_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        text_parts = []
-        for item in content:
-            if isinstance(item, str):
-                text_parts.append(item)
-            elif isinstance(item, dict) and item.get("type") == "text":
-                text_value = item.get("text")
-                if isinstance(text_value, str):
-                    text_parts.append(text_value)
-        return "".join(text_parts).strip()
-    return ""
-
-
 def _extract_message_text(message: dict[str, Any]) -> str:
-    text = _extract_text_content(message.get("content"))
-    if text:
-        return text
-    audio_obj = message.get("audio")
-    if isinstance(audio_obj, dict):
-        transcript = audio_obj.get("transcript")
-        if isinstance(transcript, str):
-            return transcript.strip()
-    return ""
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", text.lower())).strip()
+    """Extract text from a chat completion response message."""
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    # Fall back to audio transcript when content is empty
+    audio_obj = message.get("audio", {})
+    transcript = audio_obj.get("transcript", "") if isinstance(audio_obj, dict) else ""
+    return transcript.strip()
 
 
 def _build_question_text(sample: MmsuSample, prompt: str) -> str:
-    return (
-        f"{prompt}\n\n"
-        f"Question: {sample.question}\n"
-        f"A. {sample.choices[0]}\n"
-        f"B. {sample.choices[1]}\n"
-        f"C. {sample.choices[2]}\n"
-        f"D. {sample.choices[3]}"
-    )
+    lines = [f"{prompt}\n", f"Question: {sample.question}"]
+    for i, choice in enumerate(sample.choices):
+        lines.append(f"{chr(ord('A') + i)}. {choice}")
+    return "\n".join(lines)
 
 
 def _extract_prediction(
@@ -77,9 +53,9 @@ def _extract_prediction(
     if predicted_index is not None and predicted_index < len(choices):
         return predicted_index, choices[predicted_index]
 
-    normalized_response = _normalize_text(raw_response)
+    normalized_response = normalize_text(raw_response)
     for index, choice in enumerate(choices):
-        normalized_choice = _normalize_text(choice)
+        normalized_choice = normalize_text(choice)
         if not normalized_choice:
             continue
         if (
@@ -233,6 +209,7 @@ def make_mmsu_send_fn(
         session: aiohttp.ClientSession,
         sample: MmsuSample,
     ) -> RequestResult:
+        result = RequestResult(request_id=sample.sample_id)
         payload = _build_request_payload(
             sample,
             model_name=model_name,
@@ -242,21 +219,36 @@ def make_mmsu_send_fn(
             temperature=temperature,
         )
 
-        async with session.post(
-            api_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-        ) as response:
-            response.raise_for_status()
-            response_json = await response.json()
+        start_time = time.perf_counter()
+        try:
+            async with session.post(
+                api_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                response.raise_for_status()
+                response_json = await response.json()
 
-        return _build_result_from_response(
-            RequestResult(request_id=sample.sample_id),
-            response_json,
-            audio_mode=audio_mode,
-            sample_id=sample.sample_id,
-            save_audio_dir=save_audio_dir,
-        )
+            result = _build_result_from_response(
+                result,
+                response_json,
+                audio_mode=audio_mode,
+                sample_id=sample.sample_id,
+                save_audio_dir=save_audio_dir,
+            )
+
+            elapsed = time.perf_counter() - start_time
+            result.engine_time_s = elapsed
+            if result.audio_duration_s > 0:
+                result.rtf = elapsed / result.audio_duration_s
+            if result.completion_tokens > 0 and elapsed > 0:
+                result.tok_per_s = result.completion_tokens / elapsed
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            result.error = str(exc)
+        finally:
+            result.latency_s = time.perf_counter() - start_time
+
+        return result
 
     return send_fn
 
@@ -284,6 +276,12 @@ def build_mmsu_results(
         )
         correct_index = sample.answer_index
 
+        index_match = predicted_index is not None and correct_index == predicted_index
+        text_match = bool(
+            predicted_answer
+            and normalize_text(predicted_answer) == normalize_text(sample.answer_text)
+        )
+
         result = MmsuResult(
             sample_id=sample.sample_id,
             task_name=sample.task_name,
@@ -296,14 +294,7 @@ def build_mmsu_results(
             predicted_choice=INDEX_TO_LETTER.get(predicted_index, ""),
             predicted_answer=predicted_answer,
             raw_response=request_result.text,
-            is_correct=(
-                predicted_index is not None and correct_index == predicted_index
-            )
-            or (
-                predicted_answer
-                and _normalize_text(predicted_answer)
-                == _normalize_text(sample.answer_text)
-            ),
+            is_correct=index_match or text_match,
             is_parseable=predicted_index is not None or bool(predicted_answer),
             latency_s=request_result.latency_s,
             error=request_result.error,
@@ -381,8 +372,6 @@ def save_mmsu_results(
     *,
     speed_metrics: dict[str, Any] | None = None,
 ) -> None:
-    os.makedirs(output_dir, exist_ok=True)
-
     summary_output = {
         "summary": metrics,
         "config": config,
@@ -391,10 +380,9 @@ def save_mmsu_results(
     if speed_metrics:
         summary_output["speed_metrics"] = speed_metrics
 
-    json_path = os.path.join(output_dir, "mmsu_results.json")
-    with open(json_path, "w") as file_obj:
-        json.dump(summary_output, file_obj, indent=2)
+    save_json_results(summary_output, output_dir, "mmsu_results.json")
 
+    os.makedirs(output_dir, exist_ok=True)
     jsonl_path = os.path.join(output_dir, "mmsu_predictions.jsonl")
     with open(jsonl_path, "w") as file_obj:
         for result in results:

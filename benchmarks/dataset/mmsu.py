@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import random
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-AUDIO_CACHE_DIR = Path("/tmp/mmsu_audio")
+AUDIO_CACHE_DIR = Path(tempfile.mkdtemp(prefix="mmsu_audio_"))
 
 
 @dataclass
@@ -26,10 +27,15 @@ class MmsuSample:
     linguistics_sub_discipline: str
 
 
+def normalize_text(text: str) -> str:
+    """Lowercase, strip non-word chars, collapse whitespace."""
+    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", text.lower())).strip()
+
+
 def _match_answer(choices: list[str], answer: str) -> int | None:
-    norm = re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", answer.lower())).strip()
+    norm = normalize_text(answer)
     for i, c in enumerate(choices):
-        if re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", c.lower())).strip() == norm:
+        if normalize_text(c) == norm:
             return i
     return None
 

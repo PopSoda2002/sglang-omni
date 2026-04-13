@@ -47,15 +47,15 @@ async def run(args: argparse.Namespace) -> dict:
         save_audio_dir = os.path.join(args.output_dir, "audio")
         os.makedirs(save_audio_dir, exist_ok=True)
 
-    send_fn = make_mmsu_send_fn(
-        args.model,
-        api_url,
+    send_fn_kwargs = dict(
         modalities=modalities,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         save_audio_dir=save_audio_dir,
-        **({"prompt": args.prompt} if args.prompt else {}),
     )
+    if args.prompt:
+        send_fn_kwargs["prompt"] = args.prompt
+    send_fn = make_mmsu_send_fn(args.model, api_url, **send_fn_kwargs)
     runner = BenchmarkRunner(
         RunConfig(
             max_concurrency=args.max_concurrency,
