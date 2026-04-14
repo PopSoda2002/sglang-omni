@@ -5,11 +5,8 @@ from __future__ import annotations
 
 import random
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-
-_audio_cache_dir: Path | None = None
 
 
 @dataclass
@@ -40,12 +37,9 @@ def _match_answer(choices: list[str], answer: str) -> int | None:
     return None
 
 
-def _dump_audio(sample_id: str, audio_bytes: bytes) -> str:
+def _dump_audio(cache_dir: Path, sample_id: str, audio_bytes: bytes) -> str:
     """Write audio bytes to cache and return the path."""
-    global _audio_cache_dir
-    if _audio_cache_dir is None:
-        _audio_cache_dir = Path(tempfile.mkdtemp(prefix="mmsu_audio_"))
-    path = _audio_cache_dir / f"{sample_id}.mp3"
+    path = cache_dir / f"{sample_id}.mp3"
     if not path.exists():
         path.write_bytes(audio_bytes)
     return str(path)
@@ -58,12 +52,18 @@ def load_mmsu_samples(
     seed: int | None = None,
 ) -> list[MmsuSample]:
     """Load MMSU samples from HuggingFace dataset ``ddwang2000/MMSU``."""
+    import tempfile
+
     from datasets import Audio, load_dataset
 
     ds = load_dataset("ddwang2000/MMSU")
+    assert list(ds.keys()) == [
+        "train"
+    ], f"Expected only 'train' split, got {list(ds.keys())}"
     ds = ds.cast_column("audio", Audio(decode=False))
     task_set = {t.strip() for t in (task_names or []) if t.strip()} or None
     cat_set = {c.strip() for c in (categories or []) if c.strip()} or None
+    cache_dir = Path(tempfile.mkdtemp(prefix="mmsu_audio_"))
 
     samples: list[MmsuSample] = []
     for row in ds["train"]:
@@ -80,7 +80,7 @@ def load_mmsu_samples(
         samples.append(
             MmsuSample(
                 sample_id=sid,
-                audio_path=_dump_audio(sid, row["audio"]["bytes"]),
+                audio_path=_dump_audio(cache_dir, sid, row["audio"]["bytes"]),
                 question=str(row["question"]).strip(),
                 choices=choices,
                 answer_text=answer,
