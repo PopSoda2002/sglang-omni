@@ -108,7 +108,7 @@ def main() -> None:
     p.add_argument("--max-tokens", type=int, default=32)
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--warmup", type=int, default=1)
-    p.add_argument("--max-concurrency", type=int, default=1)
+    p.add_argument("--max-concurrency", type=int, default=32)
     p.add_argument("--request-rate", type=float, default=float("inf"))
     p.add_argument("--save-audio", action="store_true")
     p.add_argument("--disable-tqdm", action="store_true")
