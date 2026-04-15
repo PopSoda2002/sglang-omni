@@ -24,13 +24,13 @@ from benchmarks.eval.benchmark_omni_tts_speed import (
     OmniTtsSpeedBenchmarkConfig,
     run_omni_tts_speed_benchmark,
 )
+from sglang_omni.utils import find_available_port
 from tests.utils import (
     apply_slack,
     assert_per_request_fields,
     assert_speed_thresholds,
     assert_summary_metrics,
     assert_wer_results,
-    find_free_port,
     no_proxy_env,
     start_server_from_cmd,
     stop_server,
@@ -219,7 +219,7 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="module")
 def server_process(tmp_path_factory: pytest.TempPathFactory):
     """Start the Qwen3-Omni speech server and wait until healthy."""
-    port = find_free_port()
+    port = find_available_port()
     log_file = tmp_path_factory.mktemp("server_logs") / "server.log"
     cmd = [
         sys.executable,
