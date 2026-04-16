@@ -192,6 +192,8 @@ async def _chat_non_stream(
         )
     except ClientError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Error generating response for request %s", request_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
