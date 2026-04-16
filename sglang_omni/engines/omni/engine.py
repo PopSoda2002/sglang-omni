@@ -503,24 +503,34 @@ class OmniEngine(Engine):
         assert self.cache_manager is not None
 
         cached_outputs = {}
+        cached_requests = []
         uncached_requests = []
 
         for request in scheduler_output.requests:
             cached = self.cache_manager.get(request)
             if cached is not None:
                 cached_outputs[request.request_id] = cached
+                cached_requests.append(request)
             else:
                 uncached_requests.append(request)
 
-        if not uncached_requests:
-            req_ids = [req.request_id for req in scheduler_output.requests]
+        # Resolve cached requests immediately so their futures complete.
+        if cached_requests:
+            req_ids = [req.request_id for req in cached_requests]
             req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
-            model_output = ModelRunnerOutput(
+            cached_model_output = ModelRunnerOutput(
                 outputs=cached_outputs,
                 req_ids=req_ids,
                 req_id_to_index=req_id_to_index,
             )
-            self.scheduler.update(scheduler_output, model_output)
+            cached_scheduler_output = SchedulerOutput(
+                requests=cached_requests,
+                batch_data=None,
+                step_id=scheduler_output.step_id,
+            )
+            self.scheduler.update(cached_scheduler_output, cached_model_output)
+
+        if not uncached_requests:
             return None
 
         batch_data = self.scheduler.batch_planner.build_batch(uncached_requests)
