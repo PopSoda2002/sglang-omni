@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Deque, Optional
 from ..base import Engine
 from .model_runner import ModelRunner
 from .scheduler import Scheduler
-from .types import ModelRunnerOutput, SchedulerOutput, SchedulerStatus
+from .types import ModelRunnerOutput, SchedulerOutput, SchedulerRequest, SchedulerStatus
 
 if TYPE_CHECKING:
     from sglang_omni.pipeline.stage.stream_queue import StreamQueue
@@ -499,10 +499,18 @@ class OmniEngine(Engine):
     async def _filter_cached(
         self, scheduler_output: SchedulerOutput
     ) -> SchedulerOutput | None:
-        """Check cache and filter out cached requests."""
+        """Check cache and filter out cached requests.
+
+        Returns a SchedulerOutput containing only the uncached requests for
+        model execution, or None when there is nothing left to execute. Cached
+        requests are resolved immediately via ``scheduler.update`` so that
+        their futures complete and downstream stages unblock — dropping them
+        here (as a previous version of this code did) caused pipeline hangs
+        when the batch was mixed.
+        """
         assert self.cache_manager is not None
 
-        cached_outputs = {}
+        cached_outputs: dict[str, Any] = {}
         cached_requests = []
         uncached_requests = []
 
@@ -514,25 +522,56 @@ class OmniEngine(Engine):
             else:
                 uncached_requests.append(request)
 
-        # Resolve cached requests immediately so their futures complete.
-        if cached_requests:
-            req_ids = [req.request_id for req in cached_requests]
-            req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
-            cached_model_output = ModelRunnerOutput(
-                outputs=cached_outputs,
-                req_ids=req_ids,
-                req_id_to_index=req_id_to_index,
-            )
-            cached_scheduler_output = SchedulerOutput(
-                requests=cached_requests,
-                batch_data=None,
-                step_id=scheduler_output.step_id,
-            )
-            self.scheduler.update(cached_scheduler_output, cached_model_output)
+        # Enumerate all four states explicitly. Every branch must either
+        # resolve cached requests via `scheduler.update` or return a
+        # SchedulerOutput for the uncached ones — both, for mixed batches.
+        has_cached = bool(cached_requests)
+        has_uncached = bool(uncached_requests)
 
-        if not uncached_requests:
+        if not has_cached and not has_uncached:
+            # Empty batch: nothing to do.
             return None
+        elif has_cached and not has_uncached:
+            # All cached: resolve from cache, skip model execution.
+            self._resolve_cached(cached_requests, cached_outputs, scheduler_output)
+            return None
+        elif not has_cached and has_uncached:
+            # All uncached: pass through for model execution.
+            return self._build_uncached_output(uncached_requests, scheduler_output)
+        elif has_cached and has_uncached:
+            # Mixed: resolve cached first, then return uncached for execution.
+            self._resolve_cached(cached_requests, cached_outputs, scheduler_output)
+            return self._build_uncached_output(uncached_requests, scheduler_output)
+        else:
+            assert False, "unreachable"
 
+    def _resolve_cached(
+        self,
+        cached_requests: list[SchedulerRequest],
+        cached_outputs: dict[str, Any],
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Dispatch cached outputs through the scheduler to resolve futures."""
+        req_ids = [req.request_id for req in cached_requests]
+        req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
+        model_output = ModelRunnerOutput(
+            outputs=cached_outputs,
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+        )
+        scheduler_output_for_cached = SchedulerOutput(
+            requests=cached_requests,
+            batch_data=None,
+            step_id=scheduler_output.step_id,
+        )
+        self.scheduler.update(scheduler_output_for_cached, model_output)
+
+    def _build_uncached_output(
+        self,
+        uncached_requests: list[SchedulerRequest],
+        scheduler_output: SchedulerOutput,
+    ) -> SchedulerOutput:
+        """Build a SchedulerOutput for the uncached subset, for model execution."""
         batch_data = self.scheduler.batch_planner.build_batch(uncached_requests)
         return SchedulerOutput(
             requests=uncached_requests,
