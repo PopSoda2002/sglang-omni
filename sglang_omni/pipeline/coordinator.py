@@ -32,15 +32,12 @@ class Coordinator:
     - Broadcast abort signals
     """
 
-    DEFAULT_REQUEST_TIMEOUT: float = 120.0
-
     def __init__(
         self,
         completion_endpoint: str,
         abort_endpoint: str,
         entry_stage: str,
         terminal_stages: list[str] | None = None,
-        request_timeout: float | None = None,
     ):
         """Initialize coordinator.
 
@@ -50,16 +47,7 @@ class Coordinator:
             entry_stage: Name of the entry stage for new requests
             terminal_stages: Terminal stage names. When multiple are given,
                 the coordinator waits for all to complete before resolving.
-            request_timeout: Per-request timeout in seconds. If a request
-                does not complete within this time, it is aborted and a
-                ``TimeoutError`` is raised. Defaults to
-                ``DEFAULT_REQUEST_TIMEOUT``.
         """
-        self._request_timeout = (
-            request_timeout
-            if request_timeout is not None
-            else self.DEFAULT_REQUEST_TIMEOUT
-        )
         self.entry_stage = entry_stage
         self._terminal_stages: set[str] = (
             set(terminal_stages) if terminal_stages else set()
@@ -122,19 +110,8 @@ class Coordinator:
 
         future = self._completion_futures[request_id]
         try:
-            result = await asyncio.wait_for(future, timeout=self._request_timeout)
+            result = await future
             return result
-        except asyncio.TimeoutError:
-            logger.error(
-                "Request %s timed out after %.1fs — aborting",
-                request_id,
-                self._request_timeout,
-            )
-            await self.abort(request_id)
-            raise TimeoutError(
-                f"Request {request_id} did not complete within "
-                f"{self._request_timeout}s"
-            )
         finally:
             self._completion_futures.pop(request_id, None)
 
@@ -245,10 +222,9 @@ class Coordinator:
         # Update state
         info.state = RequestState.ABORTED
 
-        # Resolve future with error (skip if already done, e.g. by wait_for)
-        future = self._completion_futures.get(request_id)
-        if future is not None and not future.done():
-            future.set_exception(
+        # Resolve future with error
+        if request_id in self._completion_futures:
+            self._completion_futures[request_id].set_exception(
                 asyncio.CancelledError(f"Request {request_id} aborted")
             )
         if request_id in self._stream_queues:
