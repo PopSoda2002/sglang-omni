@@ -188,9 +188,7 @@ class OmniEngine(Engine):
         try:
             # 2. Check cache (if enabled)
             if self.cache_manager is not None:
-                uncached_output, cached_pending = await self._filter_cached(
-                    scheduler_output
-                )
+                uncached_output, cached_pending = self._filter_cached(scheduler_output)
                 # Normal mode has no deferred update path; apply cached
                 # resolution immediately. Safe to run before the uncached
                 # update because the two subsets are disjoint.
@@ -310,9 +308,7 @@ class OmniEngine(Engine):
             # FIFO _result_queue as uncached updates, preserving step_id
             # monotonicity (see _filter_cached docstring).
             if self.cache_manager is not None:
-                uncached_output, cached_pending = await self._filter_cached(
-                    scheduler_output
-                )
+                uncached_output, cached_pending = self._filter_cached(scheduler_output)
                 if cached_pending is not None:
                     self._result_queue.append(cached_pending)
                 if uncached_output is None:
@@ -535,7 +531,7 @@ class OmniEngine(Engine):
             except Exception:
                 pass
 
-    async def _filter_cached(
+    def _filter_cached(
         self, scheduler_output: SchedulerOutput
     ) -> tuple[SchedulerOutput | None, _PendingResult | None]:
         """Partition a scheduler output into cached and uncached halves.
