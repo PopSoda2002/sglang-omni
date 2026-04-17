@@ -1,32 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SeedTTS benchmark for Qwen3-Omni: speed measurement and WER evaluation.
+"""SeedTTS benchmark for Qwen3-Omni with performance and WER metrics.
 
-Combines benchmark_omni_tts_speed.py and voice_clone_omni_wer.py into a
-two-phase pipeline: generate audio while the server is running, then
-transcribe without the server to avoid GPU OOM.
+Note (chenyang):
 
-The benchmark always persists generated WAVs to disk so the follow-up
-transcribe phase can reuse them without regenerating audio.  Callers who
-only need speed numbers may still pass ``--generate-only`` and discard the
-resulting ``audio/`` directory.
+    This benchmark is both used in CI on a subset and locally for the whole set.
+    If running locally, the audio generation and transcription are run in overlap,
+    thus Qwen3 Omni server and the ASR model share the same GPU.
 
-Usage (run from project root so ``benchmarks`` is on sys.path; use
-``python -m benchmarks.eval.benchmark_omni_seedtts`` if invoking via a
-subprocess from another directory):
+    On the CI, to avoid GPU OOM, we run the audio generation and transcription
+    sequentially.
+
+Usage:
+
+    # Launch the server:
+    python -m sglang_omni.cli.cli serve \
+        --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
+        --port 8000
+
+    # Download the test set:
+    python -m benchmarks.dataset.prepare --dataset seedtts
+
     # Full pipeline (generate + transcribe)
     python -m benchmarks.eval.benchmark_omni_seedtts \
         --meta seedtts_testset/en/meta.lst \
         --output-dir results/qwen3_omni_en \
+        --max-concurrency 16 \
         --model qwen3-omni --port 8000 --max-samples 50
 
-    # Phase 1: generate audio only (server must be running)
+CI Usage:
+
+    # Generate audio only (server must be running)
     python -m benchmarks.eval.benchmark_omni_seedtts \
         --generate-only \
         --meta seedtts_testset/en/meta.lst \
         --output-dir results/qwen3_omni_en \
+        --max-concurrency 16 \
         --model qwen3-omni --port 8000 --max-samples 50
 
-    # Phase 2: transcribe + WER only (server not needed)
+    # Transcribe + WER only (server not needed)
     python -m benchmarks.eval.benchmark_omni_seedtts \
         --transcribe-only \
         --meta seedtts_testset/en/meta.lst \
@@ -307,7 +318,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="qwen3-omni",
         help="Model name for the API request.",
     )
-    # ``--testset`` is a legacy alias for ``--meta`` (kept for shell history).
     parser.add_argument(
         "--meta",
         "--testset",

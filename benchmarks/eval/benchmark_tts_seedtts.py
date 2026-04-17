@@ -1,36 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SeedTTS benchmark for S2-Pro TTS: speed measurement and WER evaluation.
+"""SeedTTS benchmark for TTS models with performance and WER metrics.
 
-Combines benchmark_tts_speed.py and voice_clone_tts_wer.py into a two-phase
-pipeline: generate audio while the server is running, then transcribe without
-the server to avoid GPU OOM.
+Note (Qiujiang, Chenyang):
 
-The benchmark always persists generated WAVs to disk so the follow-up
-transcribe phase can reuse them without regenerating audio.  Callers who
-only need speed numbers may still pass ``--generate-only`` and discard the
-resulting ``audio/`` directory.
+1. Voice-clone models (e.g. fishaudio/s2-pro): default uses ref_audio /
+  ref_text from the meta file.
+2. Plain TTS (e.g. mistralai/Voxtral-4B-TTS-2603): use --no-ref-audio and
+  --voice for a server-side speaker preset.
 
-Usage (run from project root so ``benchmarks`` is on sys.path; use
-``python -m benchmarks.eval.benchmark_tts_seedtts`` if invoking via a
-subprocess from another directory):
-    # Full pipeline (generate + transcribe)
+Usage:
+
+    # Download the test set:
+    python -m benchmarks.dataset.prepare --dataset seedtts
+
+    # Launch the server:
+    1. For S2-Pro:
+    python -m sglang_omni.cli.cli serve \
+        --model-path fishaudio/s2-pro \
+        --port 8000
+
+    2. For Voxtral-4B-TTS-2603:
+    python -m sglang_omni.cli.cli serve \
+        --model-path mistralai/Voxtral-4B-TTS-2603 \
+        --port 8000
+
+    # Full pipeline (generate + transcribe) — voice cloning
     python -m benchmarks.eval.benchmark_tts_seedtts \
         --meta seedtts_testset/en/meta.lst \
+        --max-concurrency 16 \
         --model fishaudio/s2-pro --port 8000
 
-    # Full pipeline, streaming, high concurrency
+    # Full pipeline — plain TTS (no ref audio from testset)
     python -m benchmarks.eval.benchmark_tts_seedtts \
         --meta seedtts_testset/en/meta.lst \
-        --model fishaudio/s2-pro --port 8000 \
-        --concurrency 8 --stream
+        --model mistralai/Voxtral-4B-TTS-2603 --port 8000 \
+        --max-concurrency 16 \
+        --no-ref-audio --voice cheerful_female --max-samples 50
 
-    # Phase 1: generate audio only (server must be running)
+For CI settings, separate the generate and transcribe phases into two runs.
+
+Usage (CI):
+
+    # Generate audio only
     python -m benchmarks.eval.benchmark_tts_seedtts \
         --generate-only \
         --meta seedtts_testset/en/meta.lst \
-        --model fishaudio/s2-pro --port 8000 --concurrency 8
+        --max-concurrency 16 \
+        --output-dir results/s2pro_en \
+        --model fishaudio/s2-pro --port 8000
 
-    # Phase 2: transcribe + WER only (server not needed)
+    # Transcribe + WER only
     python -m benchmarks.eval.benchmark_tts_seedtts \
         --transcribe-only \
         --meta seedtts_testset/en/meta.lst \
@@ -75,9 +94,14 @@ class TtsSeedttsBenchmarkConfig:
     base_url: str | None = None
     host: str = "localhost"
     port: int = 8000
-    # note (Chenyang): Default is voice-clone ON — S2-Pro's canonical flow
-    # uses the seed-tts-eval reference audio.  The legacy ``--no-ref-audio``
-    # CLI flag flips this to False for plain TTS.
+    # Optional speaker-preset name forwarded to the server as payload["voice"].
+    # Voxtral-4B-TTS-2603 uses it to pick a built-in speaker (defaults to
+    # "cheerful_female" server-side); voice-cloning models such as S2-Pro
+    # ignore it and take the speaker from ref_audio/ref_text instead.
+    voice: str | None = None
+    # Default is voice-clone ON — S2-Pro's canonical flow uses the
+    # seed-tts-eval reference audio.  The ``--no-ref-audio`` CLI flag flips
+    # this to False for plain TTS models that do not accept ref audio.
     voice_clone: bool = True
     output_dir: str = "results/tts_seedtts"
     max_samples: int | None = None
@@ -121,6 +145,7 @@ def _build_results_config(
         "base_url": base_url,
         "meta": config.meta,
         "voice_clone": config.voice_clone,
+        "voice": config.voice,
         "stream": config.stream,
         "max_samples": config.max_samples,
         "max_new_tokens": config.max_new_tokens,
@@ -155,6 +180,7 @@ async def run_tts_seedtts_benchmark(
         api_url,
         stream=config.stream,
         no_ref_audio=not config.voice_clone,
+        voice=config.voice,
         save_audio_dir=save_audio_dir,
         **generation_kwargs,
     )
@@ -189,6 +215,7 @@ def run_tts_seedtts_transcribe(config: TtsSeedttsBenchmarkConfig) -> dict:
         "model": config.model,
         "meta": config.meta,
         "voice_clone": config.voice_clone,
+        "voice": config.voice,
         "max_new_tokens": config.max_new_tokens,
         "temperature": config.temperature,
         "max_samples": config.max_samples,
@@ -212,6 +239,7 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         port=args.port,
         model=args.model,
         meta=args.meta,
+        voice=args.voice,
         voice_clone=voice_clone,
         output_dir=args.output_dir,
         max_samples=args.max_samples,
@@ -239,9 +267,7 @@ async def benchmark(config: TtsSeedttsBenchmarkConfig) -> dict:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="SeedTTS benchmark for S2-Pro TTS: speed and WER evaluation."
-    )
+    parser = argparse.ArgumentParser(description="SeedTTS benchmark for TTS models.")
     parser.add_argument(
         "--base-url",
         type=str,
@@ -256,7 +282,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="fishaudio/s2-pro",
         help="Model name for the API request.",
     )
-    # ``--testset`` is a legacy alias for ``--meta`` (kept for shell history).
+    parser.add_argument(
+        "--voice",
+        type=str,
+        default=None,
+        help=(
+            "Built-in speaker-preset name for plain TTS models that select a "
+            "voice server-side (e.g. mistralai/Voxtral-4B-TTS-2603 accepts "
+            "'cheerful_female'). Has no effect on voice-cloning models such "
+            "as fishaudio/s2-pro, which take the speaker from ref_audio in "
+            "the meta file."
+        ),
+    )
     parser.add_argument(
         "--meta",
         "--testset",
@@ -281,9 +318,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument(
         "--concurrency",
+        "--max-concurrency",
+        dest="concurrency",
         type=int,
         default=1,
-        help="Number of concurrent requests.",
+        help="Maximum concurrent requests.",
     )
     parser.add_argument(
         "--request-rate",

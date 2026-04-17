@@ -29,6 +29,10 @@ python -m sglang_omni.cli.cli serve \
     --model-path fishaudio/s2-pro \
     --config examples/configs/s2pro_tts.yaml --port 8000
 
+# Voxtral-4B-TTS — for section 2d (plain TTS, no voice cloning)
+python -m sglang_omni.cli.cli serve \
+    --model-path mistralai/Voxtral-4B-TTS-2603 --port 8000
+
 # Qwen3-Omni, speech mode — for section 3 (SeedTTS; multi-GPU)
 python -m sglang_omni.cli.cli serve \
     --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct --port 8000
@@ -56,11 +60,35 @@ python -m benchmarks.eval.benchmark_tts_seedtts \
     --model fishaudio/s2-pro \
     --output-dir results/s2pro_en --lang en --device cuda:0
 
-# 3. Qwen3-Omni — same two-phase pipeline
+# 2d. Voxtral — full pipeline without voice cloning
+python -m benchmarks.eval.benchmark_tts_seedtts \
+    --meta seedtts_testset/en/meta.lst \
+    --model mistralai/Voxtral-4B-TTS-2603 --port 8000 \
+    --max-concurrency 16 \
+    --output-dir results/voxtral_en --lang en --max-samples 50 \
+    --no-ref-audio --voice cheerful_female
+
+# 3a. Qwen3-Omni — full pipeline (generate + transcribe)
 python -m benchmarks.eval.benchmark_omni_seedtts \
     --meta seedtts_testset/en/meta.lst \
-    --model qwen3-omni --port 8000 \
-    --output-dir results/qwen3_omni_en --max-samples 50
+    --output-dir results/qwen3_omni_en \
+    --max-concurrency 16 \
+    --model qwen3-omni --port 8000 --max-samples 50
+
+# 3b. Qwen3-Omni — generate only (server required; use in CI to split phases)
+python -m benchmarks.eval.benchmark_omni_seedtts \
+    --generate-only \
+    --meta seedtts_testset/en/meta.lst \
+    --output-dir results/qwen3_omni_en \
+    --max-concurrency 16 \
+    --model qwen3-omni --port 8000 --max-samples 50
+
+# 3c. Qwen3-Omni — transcribe only (reuses audio; no server)
+python -m benchmarks.eval.benchmark_omni_seedtts \
+    --transcribe-only \
+    --meta seedtts_testset/en/meta.lst \
+    --output-dir results/qwen3_omni_en \
+    --model qwen3-omni --lang en --device cuda:0
 
 # 4. Qwen3-Omni — MMSU (audio comprehension)
 python -m benchmarks.eval.benchmark_omni_mmsu \
@@ -76,7 +104,7 @@ python -m benchmarks.eval.benchmark_omni_mmmu \
 
 | Script | Task | Model | API |
 |--------|------|-------|-----|
-| `eval/benchmark_tts_seedtts.py` | TTS speed + WER (unified) | S2-Pro | `/v1/audio/speech` |
+| `eval/benchmark_tts_seedtts.py` | TTS speed + WER (unified) | e.g. S2-Pro, Voxtral | `/v1/audio/speech` |
 | `eval/benchmark_omni_seedtts.py` | TTS speed + WER (unified) | Qwen3-Omni | `/v1/chat/completions` |
 | `eval/benchmark_omni_mmsu.py` | MMSU (audio comprehension) | Qwen3-Omni | `/v1/chat/completions` |
 | `eval/benchmark_omni_mmmu.py` | MMMU (VLM accuracy + speed) | Qwen3-Omni | `/v1/chat/completions` |
@@ -85,7 +113,10 @@ The two `*_seedtts.py` scripts merge the previous `benchmark_*_tts_speed.py`
 and `voice_clone_*_wer.py` pairs into a single two-phase pipeline: phase 1
 generates + persists WAVs while the server runs, phase 2 transcribes offline
 to avoid GPU contention with the server. Use `--generate-only` or
-`--transcribe-only` to run a single phase.
+`--transcribe-only` to run a single phase. For TTS, `--concurrency` and
+`--max-concurrency` are equivalent (see `benchmark_tts_seedtts.py`).
+`benchmark_omni_seedtts.py` documents local vs CI GPU usage in its module
+docstring (sequential phases on CI to reduce OOM risk).
 
 ## Adding a New Model or Task
 

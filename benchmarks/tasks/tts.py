@@ -995,6 +995,7 @@ def _build_tts_payload(
     *,
     stream: bool = False,
     no_ref_audio: bool = False,
+    voice: str | None = None,
     **gen_kwargs,
 ) -> dict:
     payload: dict = {
@@ -1005,6 +1006,8 @@ def _build_tts_payload(
     if not no_ref_audio:
         payload["ref_audio"] = sample.ref_audio
         payload["ref_text"] = sample.ref_text
+    if voice is not None:
+        payload["voice"] = voice
     for key, value in gen_kwargs.items():
         if value is not None:
             payload[key] = value
@@ -1150,6 +1153,7 @@ def make_tts_send_fn(
     *,
     stream: bool = False,
     no_ref_audio: bool = False,
+    voice: str | None = None,
     save_audio_dir: str | None = None,
     **gen_kwargs,
 ) -> SendFn:
@@ -1163,7 +1167,12 @@ def make_tts_send_fn(
             text=sample.target_text[:TEXT_PREVIEW_LENGTH],
         )
         payload = _build_tts_payload(
-            sample, model_name, stream=stream, no_ref_audio=no_ref_audio, **gen_kwargs
+            sample,
+            model_name,
+            stream=stream,
+            no_ref_audio=no_ref_audio,
+            voice=voice,
+            **gen_kwargs,
         )
         start_time = time.perf_counter()
         try:
