@@ -35,9 +35,25 @@ def register_omni_models_in_sglang() -> None:
     except ImportError:
         pass
 
+    try:
+        from sglang_omni.models.higgs_tts.sglang_model import HiggsMultimodalSGLangModel
+
+        ModelRegistry.models["HiggsMultimodalQwen3ForConditionalGeneration"] = (
+            HiggsMultimodalSGLangModel
+        )
+    except ImportError:
+        pass
+
     from transformers import AutoConfig
 
     try:
         AutoConfig.register("bailingmm_moe_v2_lite", BailingMM2Config)
     except ValueError:
         pass  # Already registered
+
+    try:
+        from sglang_omni.models.higgs_tts.hf_config import HiggsMultimodalQwen3Config
+
+        AutoConfig.register("higgs_multimodal_qwen3", HiggsMultimodalQwen3Config)
+    except (ValueError, ImportError):
+        pass  # Already registered or package unavailable
