@@ -108,7 +108,7 @@ def test_register_omni_models_adds_higgs_entry():
     from sglang.srt.models.registry import ModelRegistry
     from transformers import AutoConfig
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
+    from sglang_omni.models.higgs_tts.model import HiggsTTSModel
     from sglang_omni.models.sglang_registry import register_omni_models_in_sglang
 
     register_omni_models_in_sglang()
@@ -136,7 +136,7 @@ def test_model_instantiates_with_tiny_config():
     construction time)."""
     _init_sglang_tp()
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
+    from sglang_omni.models.higgs_tts.model import HiggsTTSModel
 
     cfg = _make_tiny_config()
     model = HiggsTTSModel(cfg)
@@ -167,7 +167,7 @@ def test_untied_modality_head_is_separate_param():
     """With ``tie_word_embeddings=False``, the head has its own tensor."""
     _init_sglang_tp()
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
+    from sglang_omni.models.higgs_tts.model import HiggsTTSModel
 
     enc_cfg = dict(_TINY_AUDIO_ENCODER_CONFIG, tie_word_embeddings=False)
     cfg = HiggsMultimodalQwen3Config(
@@ -242,7 +242,7 @@ def test_load_weights_routes_backbone_and_multimodal():
 
     import torch
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
+    from sglang_omni.models.higgs_tts.model import HiggsTTSModel
 
     cfg = _make_tiny_config()
     model = HiggsTTSModel(cfg)

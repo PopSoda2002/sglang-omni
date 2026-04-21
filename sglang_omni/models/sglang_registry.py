@@ -36,7 +36,7 @@ def register_omni_models_in_sglang() -> None:
         pass
 
     try:
-        from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
+        from sglang_omni.models.higgs_tts.model import HiggsTTSModel
 
         ModelRegistry.models["HiggsMultimodalQwen3ForConditionalGeneration"] = (
             HiggsTTSModel
