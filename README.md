@@ -18,3 +18,4 @@ We will host the documentation upon open-sourcing. For now, you can find the doc
 - [Developer Reference](./docs/developer_reference/architecture.md)
 - [Benchmarks](./docs/benchmarks/relay.md)
 - [Examples](./examples/README.md)
+- [Boson AI Fork Smoke Test](./docs/basic_usage/boson_fork_smoke_test.md)
