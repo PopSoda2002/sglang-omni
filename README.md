@@ -1,4 +1,4 @@
-# Boson AI Fork: S2-Pro Smoke Test
+# Boson AI Fork test
 
 This README records the smoke test used to verify the `boson-ai/sglang-omni` fork against
 the [Fish Speech S2-Pro](https://huggingface.co/fishaudio/s2-pro) reference TTS model.
