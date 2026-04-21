@@ -58,7 +58,7 @@ class _HiggsMultimodalEmbedding(nn.Module):
         )
 
 
-class HiggsMultimodalSGLangModel(nn.Module):
+class HiggsTTSModel(nn.Module):
     """Higgs Multimodal Qwen3 model (discrete TTS path) adapted for sglang.
 
     Composition over :class:`sglang.srt.models.qwen3.Qwen3ForCausalLM` —
@@ -101,7 +101,7 @@ class HiggsMultimodalSGLangModel(nn.Module):
         encoder_type = enc_cfg.get("encoder_type", "discrete")
         if encoder_type != "discrete":
             raise NotImplementedError(
-                f"HiggsMultimodalSGLangModel currently supports only the discrete "
+                f"HiggsTTSModel currently supports only the discrete "
                 f"TTS path; got encoder_type={encoder_type!r}. Whisper/Qwen3-AUT "
                 f"(ASR) encoders are planned for a future PR."
             )
@@ -233,4 +233,4 @@ class HiggsMultimodalSGLangModel(nn.Module):
         return names
 
 
-__all__ = ["HiggsMultimodalSGLangModel"]
+__all__ = ["HiggsTTSModel"]

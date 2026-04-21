@@ -108,12 +108,12 @@ def test_register_omni_models_adds_higgs_entry():
     from sglang.srt.models.registry import ModelRegistry
     from transformers import AutoConfig
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsMultimodalSGLangModel
+    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
     from sglang_omni.models.sglang_registry import register_omni_models_in_sglang
 
     register_omni_models_in_sglang()
 
-    assert ModelRegistry.models.get(ARCHITECTURE) is HiggsMultimodalSGLangModel
+    assert ModelRegistry.models.get(ARCHITECTURE) is HiggsTTSModel
 
     # AutoConfig entry — constructible from dict with ``model_type``.
     cfg = AutoConfig.for_model(
@@ -136,10 +136,10 @@ def test_model_instantiates_with_tiny_config():
     construction time)."""
     _init_sglang_tp()
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsMultimodalSGLangModel
+    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
 
     cfg = _make_tiny_config()
-    model = HiggsMultimodalSGLangModel(cfg)
+    model = HiggsTTSModel(cfg)
 
     # Submodule layout expected by the Higgs checkpoint name mapping.
     assert hasattr(model, "backbone")
@@ -167,7 +167,7 @@ def test_untied_modality_head_is_separate_param():
     """With ``tie_word_embeddings=False``, the head has its own tensor."""
     _init_sglang_tp()
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsMultimodalSGLangModel
+    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
 
     enc_cfg = dict(_TINY_AUDIO_ENCODER_CONFIG, tie_word_embeddings=False)
     cfg = HiggsMultimodalQwen3Config(
@@ -176,7 +176,7 @@ def test_untied_modality_head_is_separate_param():
         audio_token_id=-100,
         architectures=[ARCHITECTURE],
     )
-    model = HiggsMultimodalSGLangModel(cfg)
+    model = HiggsTTSModel(cfg)
 
     emb_weight = model.multimodal_embedding.modality_embedding_0.weight
     assert model.modality_head.weight is not emb_weight
@@ -242,10 +242,10 @@ def test_load_weights_routes_backbone_and_multimodal():
 
     import torch
 
-    from sglang_omni.models.higgs_tts.sglang_model import HiggsMultimodalSGLangModel
+    from sglang_omni.models.higgs_tts.sglang_model import HiggsTTSModel
 
     cfg = _make_tiny_config()
-    model = HiggsMultimodalSGLangModel(cfg)
+    model = HiggsTTSModel(cfg)
 
     # Freeze a copy of the fused embedding weight before loading so we can
     # confirm the checkpoint value overwrote it.
