@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Scaffolding tests for the Higgs TTS pipeline config (PR1).
+
+Asserts:
+- The package is discovered by the pipeline-config registry under the
+  ``HiggsMultimodalQwen3ForConditionalGeneration`` architecture key.
+- The ``HiggsTtsPipelineConfig`` instantiates cleanly with the default
+  three-stage layout (preprocessing → tts_engine → vocoder).
+- ``ConfigManager.from_model_path`` resolves the architecture from a raw
+  ``config.json`` (the path taken when ``AutoConfig`` cannot load the custom
+  ``HiggsMultimodalQwen3Config`` without ``trust_remote_code``).
+- Each stage factory is a stub that raises ``NotImplementedError``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+
+import pytest
+
+ARCHITECTURE = "HiggsMultimodalQwen3ForConditionalGeneration"
+
+
+def test_registry_discovers_higgs_tts_architecture():
+    from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+
+    supported = PIPELINE_CONFIG_REGISTRY.get_supported_archs()
+    assert (
+        ARCHITECTURE in supported
+    ), f"Higgs TTS architecture not found in registry. Registered: {sorted(supported)}"
+
+
+def test_registry_returns_higgs_tts_config_class():
+    from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+
+    config_cls = PIPELINE_CONFIG_REGISTRY.get_config(ARCHITECTURE)
+    assert config_cls.__name__ == "HiggsTtsPipelineConfig"
+
+
+def test_higgs_tts_pipeline_config_has_three_stages():
+    from sglang_omni.models.higgs_tts.config import HiggsTtsPipelineConfig
+    from sglang_omni.models.higgs_tts.pipeline.next_stage import (
+        PREPROCESSING_STAGE,
+        TTS_ENGINE_STAGE,
+        VOCODER_STAGE,
+    )
+
+    config = HiggsTtsPipelineConfig(model_path="test/higgs-tts")
+
+    stage_names = [stage.name for stage in config.stages]
+    assert stage_names == [PREPROCESSING_STAGE, TTS_ENGINE_STAGE, VOCODER_STAGE]
+    assert config.entry_stage == PREPROCESSING_STAGE
+    assert config.config_cls == "HiggsTtsPipelineConfig"
+
+
+def test_config_manager_resolves_higgs_from_local_config():
+    from sglang_omni.config.manager import ConfigManager
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = os.path.join(tmpdir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(
+                {
+                    "architectures": [ARCHITECTURE],
+                    "model_type": "higgs_multimodal_qwen3",
+                },
+                f,
+            )
+
+        mgr = ConfigManager.from_model_path(tmpdir)
+    assert mgr.config is not None
+    assert type(mgr.config).__name__ == "HiggsTtsPipelineConfig"
+
+
+def test_preprocessing_stage_factory_raises_not_implemented():
+    from sglang_omni.models.higgs_tts.pipeline.stages import (
+        create_preprocessing_executor,
+    )
+
+    with pytest.raises(NotImplementedError, match="PR3"):
+        create_preprocessing_executor("test/higgs-tts")
+
+
+def test_tts_engine_stage_factory_raises_not_implemented():
+    from sglang_omni.models.higgs_tts.pipeline.stages import (
+        create_sglang_tts_engine_executor,
+    )
+
+    with pytest.raises(NotImplementedError, match="PR4"):
+        create_sglang_tts_engine_executor("test/higgs-tts")
+
+
+def test_vocoder_stage_factory_raises_not_implemented():
+    from sglang_omni.models.higgs_tts.pipeline.stages import create_vocoder_executor
+
+    with pytest.raises(NotImplementedError, match="PR5"):
+        create_vocoder_executor("test/higgs-tts")
+
+
+def test_higgs_hf_config_instantiates():
+    """The ported HF config should instantiate with the discrete encoder shape."""
+    from sglang_omni.models.higgs_tts import HiggsMultimodalQwen3Config
+
+    cfg = HiggsMultimodalQwen3Config(
+        audio_encoder_config={
+            "encoder_type": "discrete",
+            "num_codebooks": 10,
+            "vocab_size": 1026,
+        },
+        text_config={"model_type": "qwen3", "hidden_size": 2048},
+    )
+    assert cfg.model_type == "higgs_multimodal_qwen3"
+    assert cfg.audio_encoder_config["encoder_type"] == "discrete"
+    assert cfg.text_config["hidden_size"] == 2048
