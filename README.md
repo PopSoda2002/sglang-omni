@@ -1,5 +1,7 @@
 # SGLang-Omni
 
+> **Boson AI fork.** This branch of sglang-omni is maintained by Boson AI to integrate Boson AI's multimodal models (e.g., Higgs TTS) into the SGLang-Omni pipeline framework. Upstream: [sgl-project/sglang-omni](https://github.com/sgl-project/sglang-omni).
+
 SGLang-Omni is an ecosystem project for SGLang.
 Omni models refer to models that have multi-modal inputs and multi-modal outputs.
 These models typically consist of multiple stages, making SGLang's LLM-specific architecture no longer suitable.
