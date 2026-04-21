@@ -1,10 +1,5 @@
 # Boson AI Fork test
 
-This README records the smoke test used to verify the `boson-ai/sglang-omni` fork against
-the [Fish Speech S2-Pro](https://huggingface.co/fishaudio/s2-pro) reference TTS model.
-Run it whenever the docker image, `sglang`, or `sglang-omni` dependencies change to
-confirm the baseline TTS pipeline still works end-to-end.
-
 Upstream: [sgl-project/sglang-omni](https://github.com/sgl-project/sglang-omni).
 
 ## Verified environment
