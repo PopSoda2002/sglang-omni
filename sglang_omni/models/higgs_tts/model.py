@@ -14,6 +14,7 @@ architecture name ``HiggsMultimodalQwen3ForConditionalGeneration`` (see
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Iterable, Tuple
 
 import torch
@@ -24,6 +25,8 @@ from sglang_omni.models.higgs_tts.modeling import (
     HiggsFusedMultiTextEmbedding,
     HiggsFusedMultiTextHead,
 )
+from sglang_omni.models.higgs_tts.sampler import HiggsSamplerState
+from sglang_omni.models.higgs_tts.sampler import step as sampler_step
 from sglang_omni.models.higgs_tts.weight_loader import DiscreteWeightMapper
 
 # Prefix map for the text backbone. Since we compose :class:`Qwen3ForCausalLM`
@@ -38,6 +41,29 @@ _BACKBONE_PREFIX_MAP: dict[str, str] = {
     "body.norm.": "backbone.model.norm.",
     "tied.head.text_head.": "backbone.lm_head.",
 }
+
+
+@dataclass
+class HiggsGenParams:
+    """Per-request decoding parameters consumed by :func:`sampler.step`."""
+
+    temperature: float = 1.0
+    top_p: float | None = None
+    top_k: int | None = None
+
+
+@dataclass
+class _RequestSlot:
+    """Per-request runtime bookkeeping inside :class:`HiggsTTSModel`.
+
+    Kept flat so PR4c-iii's runtime can construct / introspect one slot per
+    live request without reaching into private state machinery.
+    """
+
+    sampler: HiggsSamplerState
+    output_codes: list[torch.Tensor] = field(default_factory=list)
+    """One ``[num_codebooks]`` long tensor per AR step, accumulated in
+    generation order."""
 
 
 class _HiggsMultimodalEmbedding(nn.Module):
@@ -129,6 +155,12 @@ class HiggsTTSModel(nn.Module):
                 self.multimodal_embedding.modality_embedding_0.weight
             )
 
+        # Per-request runtime state for the forward-embedded multi-codebook
+        # decode. PR4c-ii wires :meth:`decode_codebooks_batch` into the
+        # forward pass; this dict is accessed via :meth:`get_slot` /
+        # :meth:`reset_request` by the engine stage runtime (PR4c-iii).
+        self._slots: dict[str, _RequestSlot] = {}
+
     # Accessors used by downstream stages in later PRs -----------------------
     def get_input_embeddings(self) -> nn.Embedding:
         return self.backbone.get_input_embeddings()
@@ -146,6 +178,111 @@ class HiggsTTSModel(nn.Module):
     @property
     def codebook_vocab_size(self) -> int:
         return self._codebook_vocab_size
+
+    # Per-request runtime state (consumed by PR4c-ii forward + PR4c-iii runtime)
+    def get_slot(self, req_id: str) -> _RequestSlot:
+        """Return the slot for ``req_id``, creating a fresh
+        :class:`HiggsSamplerState` on first access."""
+        slot = self._slots.get(req_id)
+        if slot is None:
+            slot = _RequestSlot(
+                sampler=HiggsSamplerState(num_codebooks=self._num_codebooks)
+            )
+            self._slots[req_id] = slot
+        return slot
+
+    def reset_request(self, req_id: str) -> None:
+        """Discard all decode state for ``req_id``. Call when a request
+        terminates or is cancelled."""
+        self._slots.pop(req_id, None)
+
+    def get_output_codes(self, req_id: str) -> torch.Tensor:
+        """Return accumulated delayed codes for ``req_id``, shape
+        ``[num_steps, num_codebooks]`` (or ``[0, num_codebooks]`` if the
+        request has not produced any steps yet)."""
+        slot = self._slots.get(req_id)
+        if slot is None or not slot.output_codes:
+            return torch.empty(
+                (0, self._num_codebooks),
+                dtype=torch.long,
+                device=self.multimodal_embedding.modality_embedding_0.weight.device,
+            )
+        return torch.stack(slot.output_codes, dim=0).to(torch.long)
+
+    # Forward-embedded multi-codebook decode --------------------------------
+    @torch.no_grad()
+    def decode_codebooks_batch(
+        self,
+        hidden_states_BD: torch.Tensor,
+        req_ids: list[str],
+        gen_params: list[HiggsGenParams],
+    ) -> torch.Tensor:
+        """Sample multi-codebook tokens for one forward step of a batch.
+
+        This is the core "forward-embedded" hook that PR4c-ii will call at
+        the tail of :meth:`forward` (mirrors s2_pro's ``_decode_codebooks``
+        at ``fishaudio_s2_pro/sglang_model.py:385-473``).
+
+        For each row ``b`` in the batch:
+        - Look up / create the request's :class:`_RequestSlot`.
+        - Run :func:`modality_head.generate` on ``hidden_states_BD[b]`` to
+          get multi-codebook logits, then PR4a's :func:`sampler.step` to
+          advance its state machine and emit ``[num_codebooks]`` codes.
+        - Append the codes to the slot's ``output_codes`` list.
+
+        Args:
+            hidden_states_BD: Per-request last-token hidden states, shape
+                ``[B, hidden_size]``.
+            req_ids: List of ``B`` request ids.
+            gen_params: List of ``B`` :class:`HiggsGenParams`.
+
+        Returns:
+            ``text_logits_BV`` of shape ``[B, text_vocab_size]`` — a
+            synthetic one-hot-ish distribution that peaks at codebook-0's
+            sampled value (padded to the text vocab). sglang's scheduler
+            then trivially samples the same codebook-0 value as the
+            "primary" next token, so token tracking / KV-cache advance
+            continues to work. The real multi-codebook codes live in
+            ``get_output_codes(req_id)``.
+        """
+        batch_size = hidden_states_BD.shape[0]
+        if len(req_ids) != batch_size or len(gen_params) != batch_size:
+            raise ValueError(
+                f"batch size mismatch: hidden={batch_size}, "
+                f"req_ids={len(req_ids)}, gen_params={len(gen_params)}"
+            )
+
+        # Multi-codebook logits for the whole batch in one fused matmul.
+        logits_BNV = self.modality_head.generate(hidden_states_BD.to(torch.float32))
+
+        text_vocab_size = self.backbone.config.vocab_size
+        text_logits_BV = torch.full(
+            (batch_size, text_vocab_size),
+            -1e4,
+            device=hidden_states_BD.device,
+            dtype=torch.float32,
+        )
+
+        for b in range(batch_size):
+            slot = self.get_slot(req_ids[b])
+            params = gen_params[b]
+            codes_N = sampler_step(
+                logits_BNV[b],
+                slot.sampler,
+                temperature=params.temperature,
+                top_p=params.top_p,
+                top_k=params.top_k,
+            )
+            slot.output_codes.append(codes_N.detach().to(torch.long))
+            # codebook-0 is the "primary" token sglang's scheduler will
+            # sample. STOP_CODE (-1) would break text sampling; map it to
+            # EOC in the text vocab, which sampler stops emitting after
+            # generation_done anyway.
+            cb0 = int(codes_N[0].item())
+            if 0 <= cb0 < text_vocab_size:
+                text_logits_BV[b, cb0] = 1e4
+
+        return text_logits_BV
 
     # Forward ----------------------------------------------------------------
     def forward(
@@ -233,4 +370,4 @@ class HiggsTTSModel(nn.Module):
         return names
 
 
-__all__ = ["HiggsTTSModel"]
+__all__ = ["HiggsGenParams", "HiggsTTSModel"]
