@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Scaffolding tests for the Higgs TTS pipeline config (PR1).
+"""Scaffolding + wiring tests for the Higgs TTS pipeline config.
 
 Asserts:
 - The package is discovered by the pipeline-config registry under the
@@ -9,7 +9,9 @@ Asserts:
 - ``ConfigManager.from_model_path`` resolves the architecture from a raw
   ``config.json`` (the path taken when ``AutoConfig`` cannot load the custom
   ``HiggsMultimodalQwen3Config`` without ``trust_remote_code``).
-- Each stage factory is a stub that raises ``NotImplementedError``.
+- The ``tts_engine`` and ``vocoder`` stage factories still raise
+  ``NotImplementedError`` (PR4 / PR5). The ``preprocessing`` factory is
+  implemented as of PR3a and exercised by ``test_higgs_tts_preprocessing``.
 """
 
 from __future__ import annotations
@@ -72,15 +74,6 @@ def test_config_manager_resolves_higgs_from_local_config():
         mgr = ConfigManager.from_model_path(tmpdir)
     assert mgr.config is not None
     assert type(mgr.config).__name__ == "HiggsTtsPipelineConfig"
-
-
-def test_preprocessing_stage_factory_raises_not_implemented():
-    from sglang_omni.models.higgs_tts.pipeline.stages import (
-        create_preprocessing_executor,
-    )
-
-    with pytest.raises(NotImplementedError, match="PR3"):
-        create_preprocessing_executor("test/higgs-tts")
 
 
 def test_tts_engine_stage_factory_raises_not_implemented():
