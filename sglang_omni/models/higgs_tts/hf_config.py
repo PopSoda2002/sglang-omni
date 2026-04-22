@@ -47,9 +47,27 @@ class HiggsMultimodalQwen3Config(transformers.PretrainedConfig):
         self.mel_per_sample = mel_per_sample
 
         self.audio_encoder_config: dict[str, Any] | None = audio_encoder_config
-        self.text_config: dict[str, Any] = (
-            text_config if text_config is not None else {}
-        )
+        # Eagerly realise text_config as a concrete PretrainedConfig object so
+        # consumers that access ``self.text_config.num_attention_heads`` etc.
+        # directly (e.g. sglang's ``hf_transformers_utils``) work without
+        # going through ``get_text_config()``. Preserves boson-vllm's
+        # dict-input contract.
+        if text_config is None:
+            text_config_obj: Any = {}
+        elif isinstance(text_config, dict):
+            model_type = text_config.get("model_type", "qwen3")
+            # transformers' CONFIG_MAPPING is a lazy mapping whose ``.get``
+            # silently returns None even for registered keys; use ``[]``.
+            try:
+                cfg_cls = transformers.CONFIG_MAPPING[model_type]
+            except KeyError:
+                cfg_cls = None
+            text_config_obj = (
+                cfg_cls(**text_config) if cfg_cls is not None else text_config
+            )
+        else:
+            text_config_obj = text_config
+        self.text_config = text_config_obj
 
         super().__init__(**kwargs)
 

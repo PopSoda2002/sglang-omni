@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from sglang_omni.models.higgs_tts.delay_pattern import BOC_ID, EOC_ID
+from sglang_omni.models.higgs_tts.delay_pattern import BOC_ID
 from sglang_omni.models.higgs_tts.hf_config import HiggsMultimodalQwen3Config
 
 ARCHITECTURE = "HiggsMultimodalQwen3ForConditionalGeneration"
@@ -127,8 +127,11 @@ def test_get_output_codes_empty_request():
 # ---------------------------------------------------------------------------
 
 
-def test_decode_codebooks_batch_returns_peaked_text_logits():
-    """Returned text logits peak at codebook-0's sampled value for each row."""
+def test_decode_codebooks_batch_returns_shaped_placeholder_logits():
+    """Returned text logits are a zero placeholder of shape
+    ``[B, text_vocab_size]`` — the runtime discards them and writes
+    codebook-0 directly into ``schedule_batch.output_ids``. Real codes
+    live in ``get_output_codes(req_id)``."""
     import torch
 
     model = _make_model()
@@ -142,13 +145,13 @@ def test_decode_codebooks_batch_returns_peaked_text_logits():
 
     V_text = model.backbone.config.vocab_size
     assert logits_BV.shape == (2, V_text)
+    # Placeholder distribution — no peak, all zeros.
+    assert torch.all(logits_BV == 0)
 
-    # Each row's argmax matches the codebook-0 of the stored slot output.
-    for b, rid in enumerate(["r1", "r2"]):
+    # Real codes were still appended to each slot.
+    for rid in ["r1", "r2"]:
         codes = model.get_output_codes(rid)
         assert codes.shape == (1, model.num_codebooks)
-        cb0 = int(codes[0, 0].item())
-        assert int(logits_BV[b].argmax().item()) == cb0
 
 
 def test_decode_codebooks_batch_applies_delay_overrides():
@@ -222,9 +225,11 @@ def test_decode_codebooks_batch_size_mismatch_raises():
         )
 
 
-def test_stop_code_on_generation_done_is_safe():
-    """A request that's already ``generation_done`` returns ``STOP_CODE``
-    (-1) from the sampler; the text logits must not crash on that."""
+def test_stop_code_on_generation_done_is_filtered():
+    """A request already ``generation_done`` makes the sampler return
+    ``STOP_CODE`` (-1); :meth:`decode_codebooks_batch` must NOT append
+    such sentinel rows to ``output_codes`` (they would corrupt the
+    downstream vocoder)."""
     import torch
 
     model = _make_model()
@@ -239,9 +244,7 @@ def test_stop_code_on_generation_done_is_safe():
     )
     V_text = model.backbone.config.vocab_size
     assert logits_BV.shape == (1, V_text)
-    # -1 is out of range → no one-hot boost → all values stay at -1e4.
-    assert logits_BV.max().item() < 0
+    # No STOP_CODE row was appended — output_codes stays empty for this
+    # request because it had nothing valid to emit.
     codes = model.get_output_codes("r1")
-    assert codes[0, 0].item() == -1  # STOP_CODE sentinel stored
-    # eoc_id in text vocab shouldn't be incorrectly boosted either.
-    assert logits_BV[0, EOC_ID].item() < 0
+    assert codes.shape == (0, model.num_codebooks)

@@ -9,9 +9,9 @@ Asserts:
 - ``ConfigManager.from_model_path`` resolves the architecture from a raw
   ``config.json`` (the path taken when ``AutoConfig`` cannot load the custom
   ``HiggsMultimodalQwen3Config`` without ``trust_remote_code``).
-- The ``tts_engine`` and ``vocoder`` stage factories still raise
-  ``NotImplementedError`` (PR4 / PR5). The ``preprocessing`` factory is
-  implemented as of PR3a and exercised by ``test_higgs_tts_preprocessing``.
+- The ``vocoder`` stage factory still raises ``NotImplementedError``
+  (PR5). ``preprocessing`` is implemented as of PR3a, ``tts_engine``
+  as of PR4c.
 """
 
 from __future__ import annotations
@@ -76,15 +76,6 @@ def test_config_manager_resolves_higgs_from_local_config():
     assert type(mgr.config).__name__ == "HiggsTtsPipelineConfig"
 
 
-def test_tts_engine_stage_factory_raises_not_implemented():
-    from sglang_omni.models.higgs_tts.pipeline.stages import (
-        create_sglang_tts_engine_executor,
-    )
-
-    with pytest.raises(NotImplementedError, match="PR4"):
-        create_sglang_tts_engine_executor("test/higgs-tts")
-
-
 def test_vocoder_stage_factory_raises_not_implemented():
     from sglang_omni.models.higgs_tts.pipeline.stages import create_vocoder_executor
 
@@ -106,4 +97,7 @@ def test_higgs_hf_config_instantiates():
     )
     assert cfg.model_type == "higgs_multimodal_qwen3"
     assert cfg.audio_encoder_config["encoder_type"] == "discrete"
-    assert cfg.text_config["hidden_size"] == 2048
+    # PR4c eagerly realises text_config as a concrete ``Qwen3Config`` instance
+    # (attribute access, not subscript) so sglang's ``hf_transformers_utils``
+    # can read ``num_attention_heads`` / ``hidden_size`` directly.
+    assert cfg.text_config.hidden_size == 2048

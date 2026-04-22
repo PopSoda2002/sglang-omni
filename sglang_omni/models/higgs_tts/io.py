@@ -31,6 +31,16 @@ class HiggsTtsState:
     top_k: int | None = None
     seed: int | None = None
 
+    # Filled by tts_engine (PR4c).
+    output_codes_delayed: list[list[int]] | None = None
+    """Multi-codebook codes produced by the engine, shape
+    ``[num_steps, num_codebooks]`` serialised as nested list. PR5's
+    vocoder applies :func:`reverse_delay_pattern` before decoding."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    engine_time_s: float = 0.0
+
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "prompt_token_ids": list(self.prompt_token_ids),
@@ -44,6 +54,12 @@ class HiggsTtsState:
         for key in ("top_p", "top_k", "seed"):
             value = getattr(self, key)
             if value is not None:
+                data[key] = value
+        if self.output_codes_delayed is not None:
+            data["output_codes_delayed"] = self.output_codes_delayed
+        for key in ("prompt_tokens", "completion_tokens", "engine_time_s"):
+            value = getattr(self, key)
+            if value:
                 data[key] = value
         return data
 
@@ -59,6 +75,10 @@ class HiggsTtsState:
             top_p=data.get("top_p"),
             top_k=data.get("top_k"),
             seed=data.get("seed"),
+            output_codes_delayed=data.get("output_codes_delayed"),
+            prompt_tokens=data.get("prompt_tokens", 0),
+            completion_tokens=data.get("completion_tokens", 0),
+            engine_time_s=data.get("engine_time_s", 0.0),
         )
 
 
