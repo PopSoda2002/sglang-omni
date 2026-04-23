@@ -16,6 +16,7 @@ _REAL_CKPT = "/hot-data/checkpoints/TTS/c66596d6cde44fb4ba8076cc2dc1e77c/step_35
 
 # Expected ids from the reference Higgs checkpoint.
 _EXPECTED_IDS = {
+    "<|tts|>": 151667,
     "<|ref_audio|>": 151679,
     "<|text|>": 151672,
     "<|audio|>": 151670,
@@ -39,6 +40,7 @@ def _make_adapter() -> HiggsTokenizerAdapter:
 
 def test_special_ids_resolved():
     adapter = _make_adapter()
+    assert adapter.tts_id == 151667
     assert adapter.ref_audio_id == 151679
     assert adapter.text_id == 151672
     assert adapter.audio_id == 151670
@@ -53,18 +55,21 @@ def test_missing_special_raises():
 def test_build_prompt_voice_cloning():
     adapter = _make_adapter()
     ids = adapter.build_prompt("hi", num_ref_tokens=5)
-    assert ids[0] == adapter.ref_audio_id
-    assert ids[1:6] == [AUDIO_PLACEHOLDER_ID] * 5
-    assert ids[6] == adapter.text_id
+    # <|tts|> task token first, then the ref audio segment.
+    assert ids[0] == adapter.tts_id
+    assert ids[1] == adapter.ref_audio_id
+    assert ids[2:7] == [AUDIO_PLACEHOLDER_ID] * 5
+    assert ids[7] == adapter.text_id
     assert ids[-1] == adapter.audio_id
-    assert ids[7:-1] == adapter.tokenizer.encode("hi", add_special_tokens=False)
+    assert ids[8:-1] == adapter.tokenizer.encode("hi", add_special_tokens=False)
 
 
 def test_build_prompt_zero_shot():
     adapter = _make_adapter()
     ids = adapter.build_prompt("hello", num_ref_tokens=0)
     assert AUDIO_PLACEHOLDER_ID not in ids
-    assert ids[0] == adapter.text_id
+    assert ids[0] == adapter.tts_id
+    assert ids[1] == adapter.text_id
     assert ids[-1] == adapter.audio_id
     assert adapter.ref_audio_id not in ids
 

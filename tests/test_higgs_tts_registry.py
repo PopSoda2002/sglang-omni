@@ -20,8 +20,6 @@ import json
 import os
 import tempfile
 
-import pytest
-
 ARCHITECTURE = "HiggsMultimodalQwen3ForConditionalGeneration"
 
 
@@ -74,13 +72,6 @@ def test_config_manager_resolves_higgs_from_local_config():
         mgr = ConfigManager.from_model_path(tmpdir)
     assert mgr.config is not None
     assert type(mgr.config).__name__ == "HiggsTtsPipelineConfig"
-
-
-def test_vocoder_stage_factory_raises_not_implemented():
-    from sglang_omni.models.higgs_tts.pipeline.stages import create_vocoder_executor
-
-    with pytest.raises(NotImplementedError, match="PR5"):
-        create_vocoder_executor("test/higgs-tts")
 
 
 def test_higgs_hf_config_instantiates():

@@ -63,6 +63,17 @@ def create_higgs_sglang_engine(
     # defaults work for Qwen3.
     server_args.disable_cuda_graph = True
 
+    # Disable radix cache: our TTS prompts all share the
+    # ``<|tts|> <|ref_audio|> [-100]...`` prefix in token-id space, but
+    # the ``-100`` placeholders are overlaid with different per-request
+    # ref-audio embeddings at prefill time (see ``HiggsSGLangModelRunner.
+    # _inject_ref_audio_prefill``). Radix cache matches on token ids and
+    # would cross-contaminate: request B reuses request A's cached KV
+    # (with A's ref audio embedded) and ends up synthesising a hybrid.
+    # Empirically observed as "Whisper transcribes request B's audio as
+    # request A's reference text."
+    server_args.disable_radix_cache = True
+
     model_worker = ModelWorker(
         config=ModelWorkerConfig(),
         server_args=server_args,

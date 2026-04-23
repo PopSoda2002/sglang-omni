@@ -17,6 +17,7 @@ from sglang_omni.proto import StagePayload
 from sglang_omni.proto.request import OmniRequest
 
 _SPECIAL_IDS = {
+    "<|tts|>": 151667,
     "<|ref_audio|>": 151679,
     "<|text|>": 151672,
     "<|audio|>": 151670,
@@ -52,13 +53,16 @@ def test_zero_shot_string_input():
     state = load_state(out)
     assert state.reference_codes_delayed is None
     assert AUDIO_PLACEHOLDER_ID not in state.prompt_token_ids
-    assert state.prompt_token_ids[0] == _SPECIAL_IDS["<|text|>"]
+    # <|tts|> task token first, then <|text|>.
+    assert state.prompt_token_ids[0] == _SPECIAL_IDS["<|tts|>"]
+    assert state.prompt_token_ids[1] == _SPECIAL_IDS["<|text|>"]
     assert state.prompt_token_ids[-1] == _SPECIAL_IDS["<|audio|>"]
 
 
 def test_zero_shot_dict_input_uses_input_key():
     state = load_state(_make_fn()(_payload({"input": "abc"})))
-    assert state.prompt_token_ids[0] == _SPECIAL_IDS["<|text|>"]
+    assert state.prompt_token_ids[0] == _SPECIAL_IDS["<|tts|>"]
+    assert state.prompt_token_ids[1] == _SPECIAL_IDS["<|text|>"]
 
 
 def test_voice_cloning_applies_delay_and_placeholders():
@@ -73,9 +77,10 @@ def test_voice_cloning_applies_delay_and_placeholders():
     assert all(len(row) == N for row in state.reference_codes_delayed)
 
     ids = state.prompt_token_ids
-    assert ids[0] == _SPECIAL_IDS["<|ref_audio|>"]
-    assert ids[1 : 1 + expected_len] == [AUDIO_PLACEHOLDER_ID] * expected_len
-    assert ids[1 + expected_len] == _SPECIAL_IDS["<|text|>"]
+    assert ids[0] == _SPECIAL_IDS["<|tts|>"]
+    assert ids[1] == _SPECIAL_IDS["<|ref_audio|>"]
+    assert ids[2 : 2 + expected_len] == [AUDIO_PLACEHOLDER_ID] * expected_len
+    assert ids[2 + expected_len] == _SPECIAL_IDS["<|text|>"]
     assert ids[-1] == _SPECIAL_IDS["<|audio|>"]
 
 

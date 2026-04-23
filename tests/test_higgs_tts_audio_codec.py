@@ -15,8 +15,10 @@ import os
 import pytest
 
 _REAL_CODEC_CKPT = "/ceph/models/eustlb__higgs-audio-v2-tokenizer"
+_REAL_TTS_CKPT = "/hot-data/checkpoints/TTS/c66596d6cde44fb4ba8076cc2dc1e77c/step_35500"
 
 _real_codec_missing = not os.path.isdir(_REAL_CODEC_CKPT)
+_real_tts_missing = not os.path.isdir(_REAL_TTS_CKPT)
 
 
 @pytest.fixture(scope="module")
@@ -126,3 +128,42 @@ def test_decode_rejects_non_2d_codes(codec):
 
     with pytest.raises(ValueError, match=r"\[T, num_codebooks\]"):
         codec.decode(torch.zeros(1, 10, 8, dtype=torch.long))
+
+
+@pytest.mark.skipif(
+    _real_tts_missing,
+    reason=f"Real Higgs TTS ckpt not mounted at {_REAL_TTS_CKPT}",
+)
+def test_from_tts_ckpt_matches_standalone_codec():
+    """Loading the codec directly from a TTS ckpt should produce a
+    model with the same structure as a standalone codec load. Output
+    may drift slightly because TTS training may have touched the
+    (nominally frozen) codec weights — we check mel-energy overlap
+    rather than bitwise equality."""
+    import math
+
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
+
+    codec_tts = HiggsAudioCodec.from_tts_ckpt(_REAL_TTS_CKPT, device="cuda")
+    codec_sa = HiggsAudioCodec.from_pretrained(_REAL_CODEC_CKPT, device="cuda")
+
+    # Same parameter count / sample rate — smoke of architecture match.
+    assert codec_tts.SAMPLE_RATE == codec_sa.SAMPLE_RATE
+    assert sum(p.numel() for p in codec_tts.model.parameters()) == sum(
+        p.numel() for p in codec_sa.model.parameters()
+    )
+
+    # Round-trip the same waveform through both; waveforms must be very
+    # close (>= 0.99 cosine) even if the discrete codes diverge.
+    wav = 0.3 * torch.sin(2 * math.pi * 440 * torch.linspace(0, 1.0, 24_000))
+    c1 = codec_tts.encode_reference(wav, sample_rate=24_000)
+    c2 = codec_sa.encode_reference(wav, sample_rate=24_000)
+    w1 = codec_tts.decode(c1)
+    w2 = codec_sa.decode(c2)
+    cos = torch.nn.functional.cosine_similarity(w1.unsqueeze(0), w2.unsqueeze(0)).item()
+    assert cos >= 0.99, f"TTS-ckpt codec vs standalone cosine {cos:.4f} < 0.99"

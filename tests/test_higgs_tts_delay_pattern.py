@@ -10,6 +10,7 @@ from sglang_omni.models.higgs_tts.delay_pattern import (
     BOC_ID,
     EOC_ID,
     apply_delay_pattern,
+    reverse_delay_pattern,
 )
 
 
@@ -37,3 +38,41 @@ def test_codebook_i_delayed_by_i():
 def test_requires_2d():
     with pytest.raises(ValueError, match="2-D"):
         apply_delay_pattern(torch.zeros(4, dtype=torch.long))
+
+
+# ---------------------------------------------------------------------------
+# reverse_delay_pattern (PR5)
+# ---------------------------------------------------------------------------
+
+
+def test_reverse_roundtrip():
+    """apply → reverse recovers the original codes."""
+    torch.manual_seed(0)
+    for T, N in [(1, 2), (3, 3), (6, 4), (17, 8)]:
+        codes = torch.randint(0, 1024, (T, N), dtype=torch.long)
+        recovered = reverse_delay_pattern(apply_delay_pattern(codes))
+        assert recovered.shape == codes.shape
+        assert torch.equal(recovered, codes)
+
+
+def test_reverse_drops_boc_prefix():
+    """First ``c`` rows of codebook ``c`` are BOC and must not leak through."""
+    codes = torch.tensor([[10, 20, 30], [11, 21, 31], [12, 22, 32]])
+    delayed = apply_delay_pattern(codes)
+    recovered = reverse_delay_pattern(delayed)
+    # None of the recovered values should be BOC/EOC.
+    assert int(recovered.min().item()) >= 0
+    assert BOC_ID not in recovered.unique().tolist()
+    assert EOC_ID not in recovered.unique().tolist()
+
+
+def test_reverse_requires_2d():
+    with pytest.raises(ValueError, match="2-D"):
+        reverse_delay_pattern(torch.zeros(4, dtype=torch.long))
+
+
+def test_reverse_rejects_too_short():
+    """L < N leaves no data rows — must raise rather than return empty."""
+    # N=8, L=5 → T = 5 - 7 = -2 (invalid).
+    with pytest.raises(ValueError, match="at least one"):
+        reverse_delay_pattern(torch.zeros(5, 8, dtype=torch.long))

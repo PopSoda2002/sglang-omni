@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tokenizer adapter for HiggsMultimodalQwen3 TTS.
 
-Resolves the three specials used by :meth:`HiggsTokenizerAdapter.build_prompt`
-(``<|ref_audio|>``, ``<|text|>``, ``<|audio|>``) and assembles:
+Resolves the four specials used by :meth:`HiggsTokenizerAdapter.build_prompt`
+(``<|tts|>``, ``<|ref_audio|>``, ``<|text|>``, ``<|audio|>``) and assembles
+the TTS prompt. Template (matches boson-vllm's
+``experiments/openai_server_higgs_tts.py``):
 
-- voice-cloning:  ``<|ref_audio|> [-100]×N <|text|> tok(text) <|audio|>``
-- zero-shot:      ``<|text|> tok(text) <|audio|>``
+- voice-cloning:  ``<|tts|> <|ref_audio|> [-100]×N <|text|> tok(text) <|audio|>``
+- zero-shot:      ``<|tts|> <|text|> tok(text) <|audio|>``
+
+``<|tts|>`` is the task-mode token — the model routes between ASR and TTS
+behaviour on this token; a missing task prefix produces plausible-sounding
+but content-wrong speech (the synthesized words don't match the prompt).
 
 ``-100`` is the position at which :class:`HiggsFusedMultiTextEmbedding` will
 splice in the summed multi-codebook embeddings for the reference audio; the
@@ -21,7 +27,12 @@ from typing import Any
 # ``IGNORE_INDEX`` convention for multimodal placeholders.
 AUDIO_PLACEHOLDER_ID = -100
 
-_REQUIRED_SPECIALS: tuple[str, ...] = ("<|ref_audio|>", "<|text|>", "<|audio|>")
+_REQUIRED_SPECIALS: tuple[str, ...] = (
+    "<|tts|>",
+    "<|ref_audio|>",
+    "<|text|>",
+    "<|audio|>",
+)
 
 
 class HiggsTokenizerAdapter:
@@ -31,6 +42,7 @@ class HiggsTokenizerAdapter:
         missing = [t for t in _REQUIRED_SPECIALS if t not in vocab]
         if missing:
             raise ValueError(f"Tokenizer is missing Higgs TTS specials: {missing}")
+        self.tts_id: int = vocab["<|tts|>"]
         self.ref_audio_id: int = vocab["<|ref_audio|>"]
         self.text_id: int = vocab["<|text|>"]
         self.audio_id: int = vocab["<|audio|>"]
@@ -42,7 +54,7 @@ class HiggsTokenizerAdapter:
     def build_prompt(self, prompt_text: str, *, num_ref_tokens: int = 0) -> list[int]:
         if num_ref_tokens < 0:
             raise ValueError(f"num_ref_tokens must be >= 0, got {num_ref_tokens}")
-        ids: list[int] = []
+        ids: list[int] = [self.tts_id]
         if num_ref_tokens > 0:
             ids.append(self.ref_audio_id)
             ids.extend([AUDIO_PLACEHOLDER_ID] * num_ref_tokens)

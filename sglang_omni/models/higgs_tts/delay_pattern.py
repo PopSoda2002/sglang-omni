@@ -44,4 +44,41 @@ def apply_delay_pattern(codes_TN: torch.Tensor) -> torch.Tensor:
     return out
 
 
-__all__ = ["BOC_ID", "EOC_ID", "apply_delay_pattern"]
+def reverse_delay_pattern(delayed_LN: torch.Tensor) -> torch.Tensor:
+    """Undo :func:`apply_delay_pattern`.
+
+    Given a delayed sequence of shape ``[L, N]`` (where ``L >= N - 1`` so
+    the data segment has at least one row), pull codebook ``c`` back by
+    ``c`` steps and return the ``[L - (N - 1), N]`` data window. The BOC
+    prefix (first ``c`` rows of codebook ``c``) and the EOC tail (rows
+    past the data region) are dropped.
+
+    Mirrors boson-vllm's ``simple_tts_inference.py:65-91`` reconstruction
+    step.
+
+    Args:
+        delayed_LN: Delayed tokens from :func:`apply_delay_pattern` or
+            directly from the AR decoder, shape ``[L, N]``.
+
+    Returns:
+        Raw codes of shape ``[L - (N - 1), N]``. Rows with ``L < N - 1``
+        can't be reconstructed — the function raises ``ValueError``.
+    """
+    if delayed_LN.ndim != 2:
+        raise ValueError(
+            f"delayed_LN must be 2-D [L, N], got shape {tuple(delayed_LN.shape)}"
+        )
+    L, N = delayed_LN.shape
+    T = L - (N - 1)
+    if T <= 0:
+        raise ValueError(
+            f"delayed_LN has L={L}, N={N}; need L >= N so at least one "
+            f"data row can be recovered."
+        )
+    out = torch.empty((T, N), device=delayed_LN.device, dtype=delayed_LN.dtype)
+    for c in range(N):
+        out[:, c] = delayed_LN[c : c + T, c]
+    return out
+
+
+__all__ = ["BOC_ID", "EOC_ID", "apply_delay_pattern", "reverse_delay_pattern"]
