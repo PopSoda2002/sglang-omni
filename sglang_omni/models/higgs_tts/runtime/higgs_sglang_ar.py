@@ -49,15 +49,16 @@ class HiggsSGLangRequestData(SGLangARRequestData):
     """Per-request state: prompt, ref-audio codes, generation params,
     accumulated output codes."""
 
-    reference_codes_delayed: torch.Tensor | None = None
-    """Ref-audio codes AFTER delay pattern, shape
-    ``[num_ref_tokens, num_codebooks]``. Consumed by the model runner
-    during prefill to overlay onto ``-100`` placeholder positions."""
+    reference_audio_embed: torch.Tensor | None = None
+    """Pre-computed fused audio embedding, shape ``[num_ref_tokens,
+    hidden_size]``. Produced by the pipeline's ``audio_encoder`` stage;
+    the model runner pastes it at ``-100`` placeholder positions during
+    prefill — no per-step fused embedding work is done here."""
 
     num_ref_codes_consumed: int = 0
-    """Count of rows from ``reference_codes_delayed`` already overlaid onto
+    """Count of rows from ``reference_audio_embed`` already overlaid onto
     earlier prefill chunks. Advanced by the model runner; lets chunked
-    prefill slice the codes tensor correctly across multiple extend calls."""
+    prefill slice the embed tensor correctly across multiple extend calls."""
 
     num_codebooks: int = 8
     codebook_size: int = 1026
@@ -137,9 +138,10 @@ class HiggsSGLangModelRunner:
 
     Prefill:
         Computes ``text_embeds = embed_tokens(input_ids)``, then for each
-        request with ``reference_codes_delayed`` set, overlays
-        ``fused_embedding(ref_codes)`` at the ``-100`` placeholder
-        positions (matches PR3a's prompt layout). Passes the result as
+        request with ``reference_audio_embed`` set (precomputed by the
+        pipeline's ``audio_encoder`` stage), scatters the embed rows at
+        the ``-100`` placeholder positions. No fused lookup happens
+        here — that's the encoder stage's job. Passes the result as
         ``input_embeds`` to the model's forward, bypassing the safe-id
         fallback for ``-100``.
 
@@ -173,14 +175,18 @@ class HiggsSGLangModelRunner:
         model_worker_batch: Any,
         scheduler_output: SchedulerOutput,
     ) -> None:
+        """Paste the pre-computed ``reference_audio_embed`` at the ``-100``
+        placeholder positions. The fused lookup + sum already happened in
+        the pipeline's ``audio_encoder`` stage, so this is just a scatter.
+        """
         device = model_worker_batch.input_ids.device
         model = self._model
         embed_tokens = model.backbone.model.embed_tokens
-        fused = model.multimodal_embedding.modality_embedding_0
 
         input_ids = model_worker_batch.input_ids
         # ``embed_tokens`` would OOB on -100; substitute 0 before embed,
-        # then overwrite at placeholder positions with fused_embedding.
+        # then overwrite at placeholder positions with the precomputed
+        # fused audio embedding.
         placeholder_mask = input_ids == AUDIO_PLACEHOLDER_ID
         safe_ids = torch.where(placeholder_mask, torch.zeros_like(input_ids), input_ids)
         text_embeds = embed_tokens(safe_ids)
@@ -192,37 +198,33 @@ class HiggsSGLangModelRunner:
             end = offset + req_len
 
             if (
-                data.reference_codes_delayed is not None
-                and data.reference_codes_delayed.numel() > 0
+                data.reference_audio_embed is not None
+                and data.reference_audio_embed.numel() > 0
             ):
-                # Slice the placeholder mask to this request's window.
                 full_mask = placeholder_mask[offset:end]
                 n_placeholders = int(full_mask.sum().item())
                 if n_placeholders > 0:
-                    codes = data.reference_codes_delayed.to(
-                        device=device, dtype=torch.long
-                    )
-                    # ``num_ref_codes_consumed`` tracks how many ref-code rows
-                    # were already overlaid on previous (chunked) prefill
-                    # calls. ``len(req.prefix_indices)`` is the wrong base
-                    # here because it counts ALL cached tokens (text +
+                    embed = data.reference_audio_embed.to(device=device)
+                    # ``num_ref_codes_consumed`` tracks how many rows from
+                    # the precomputed embed were overlaid on prior chunked
+                    # prefill calls. ``len(req.prefix_indices)`` is the
+                    # wrong base — it counts ALL cached tokens (text +
                     # placeholders), not just placeholder tokens.
                     consumed = data.num_ref_codes_consumed
-                    if codes.shape[0] < consumed + n_placeholders:
+                    if embed.shape[0] < consumed + n_placeholders:
                         logger.warning(
-                            "reference_codes_delayed too short for req %s "
+                            "reference_audio_embed too short for req %s "
                             "(have %d rows, already consumed %d, need %d more); "
                             "skipping overlay",
                             sched_req.request_id,
-                            codes.shape[0],
+                            embed.shape[0],
                             consumed,
                             n_placeholders,
                         )
                     else:
-                        codes_slice = codes[consumed : consumed + n_placeholders]
-                        fused_embeds = fused(codes_slice)  # [n, D]
+                        embed_slice = embed[consumed : consumed + n_placeholders]
                         mask_idx = full_mask.nonzero(as_tuple=True)[0] + offset
-                        text_embeds[mask_idx] = fused_embeds.to(text_embeds.dtype)
+                        text_embeds[mask_idx] = embed_slice.to(text_embeds.dtype)
                         data.num_ref_codes_consumed = consumed + n_placeholders
 
             offset = end

@@ -44,11 +44,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_pipeline(prompt_wav: str, synth_text: str) -> dict:
-    """Drive the full 3-stage pipeline manually and return the
-    vocoder-stage payload.data dict (with ``audio_data`` / ``sample_rate``).
+def _run_pipeline(prompt_wav: str, synth_text: str) -> tuple[dict, dict]:
+    """Drive the full 5-stage pipeline manually and return
+    ``(final_vocoder_data, audio_encoder_output_data)``. The second
+    value is used by the test to confirm the audio_encoder stage
+    actually populated ``reference_audio_embed``.
     """
     from sglang_omni.models.higgs_tts.pipeline.stages import (
+        create_aggregate_executor,
+        create_audio_encoder_executor,
         create_preprocessing_executor,
         create_sglang_tts_engine_executor,
         create_vocoder_executor,
@@ -56,10 +60,12 @@ def _run_pipeline(prompt_wav: str, synth_text: str) -> dict:
     from sglang_omni.proto import StagePayload
     from sglang_omni.proto.request import OmniRequest
 
-    # Single-ckpt pipeline: preprocess + vocoder both take the codec
-    # from the TTS ckpt's inlined ``tied.embedding.modality_embeddings``
-    # weights. No separate audio-codec mount needed.
+    # 5-stage pipeline — all backed by the same TTS ckpt, no separate
+    # codec mount required. audio_encoder pre-computes the fused ref
+    # audio embedding so the engine's prefill is a pure scatter.
     preprocess = create_preprocessing_executor(_HIGGS_CKPT, audio_codec_device="cuda:0")
+    audio_encoder = create_audio_encoder_executor(_HIGGS_CKPT, device="cuda:0")
+    aggregate = create_aggregate_executor()
     engine = create_sglang_tts_engine_executor(
         _HIGGS_CKPT,
         device="cuda:0",
@@ -81,33 +87,24 @@ def _run_pipeline(prompt_wav: str, synth_text: str) -> dict:
         data=None,
     )
 
+    async def _drive(stage, payload):
+        await stage.start()
+        try:
+            await stage.add_request(payload)
+            return await stage.get_result()
+        finally:
+            await stage.stop()
+
     async def _run():
-        # Preprocess + vocoder are PreprocessingExecutors — sync; engine
-        # is an async EngineExecutor.
-        await preprocess.start()
-        try:
-            await preprocess.add_request(payload)
-            pp_out = await preprocess.get_result()
-        finally:
-            await preprocess.stop()
+        p = await _drive(preprocess, payload)
+        p_after_enc = await _drive(audio_encoder, p)
+        p = await _drive(aggregate, p_after_enc)
+        p = await _drive(engine, p)
+        final = await _drive(vocoder, p)
+        return final, p_after_enc
 
-        await engine.start()
-        try:
-            await engine.add_request(pp_out)
-            eng_out = await engine.get_result()
-        finally:
-            await engine.stop()
-
-        await vocoder.start()
-        try:
-            await vocoder.add_request(eng_out)
-            voc_out = await vocoder.get_result()
-        finally:
-            await vocoder.stop()
-
-        return voc_out
-
-    return asyncio.run(_run()).data
+    final, after_encoder = asyncio.run(_run())
+    return final.data, after_encoder.data
 
 
 def test_full_pipeline_with_seed_tts_reference():
@@ -117,7 +114,18 @@ def test_full_pipeline_with_seed_tts_reference():
     # Sanity-check the test fixture before the expensive engine spin-up.
     assert os.path.isfile(prompt_wav), f"missing {prompt_wav}"
 
-    data = _run_pipeline(prompt_wav, synth_text)
+    data, encoder_data = _run_pipeline(prompt_wav, synth_text)
+
+    # The audio_encoder stage must have pre-computed the fused ref-audio
+    # embedding — guards against the regression where the new stages
+    # silently get skipped and the pipeline runs as zero-shot.
+    from sglang_omni.models.higgs_tts.io import HiggsTtsState
+
+    encoder_state = HiggsTtsState.from_dict(encoder_data)
+    assert (
+        encoder_state.reference_audio_embed is not None
+    ), "audio_encoder stage did not populate reference_audio_embed"
+    assert len(encoder_state.reference_audio_embed) > 0
 
     audio = data["audio_data"]
     sr = data["sample_rate"]

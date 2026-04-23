@@ -1,16 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stage factories for the Higgs TTS pipeline.
 
+Pipeline shape::
+
+    preprocessing → audio_encoder → aggregate → tts_engine → vocoder
+
 - ``create_preprocessing_executor``: text + reference audio (raw
-  waveform OR pre-encoded codes) → prompt ids with ``-100`` placeholders,
-  wrapped in a :class:`HiggsTtsState` on the payload. Server-side audio
-  encoding uses :class:`HiggsAudioCodec` (PR3b); pre-encoded codes remain
-  the fast path for clients that already have them.
-- ``create_sglang_tts_engine_executor`` (PR4c): runs the Higgs TTS model
-  under sglang's engine and returns ``[L, num_codebooks]`` delayed codes.
-- ``create_vocoder_executor`` (PR5): reverse the delay pattern, decode
-  via :class:`HiggsAudioCodec` into a mono 24 kHz waveform, and attach
-  it to the payload so ``/v1/audio/speech`` returns WAV bytes.
+  waveform OR pre-encoded codes) → prompt ids with ``-100`` placeholders +
+  delayed ref-audio codes on the state. Server-side audio encoding uses
+  :class:`HiggsAudioCodec`; pre-encoded codes are the fast path.
+- ``create_audio_encoder_executor``: runs the fused multi-codebook
+  embedding on the delayed ref-audio codes to produce a
+  ``[num_ref_tokens, hidden_size]`` tensor stashed as
+  ``state.reference_audio_embed``. Mirrors ``ming_omni`` /
+  ``qwen3_omni``'s modality-encoder convention.
+- ``create_aggregate_executor``: identity barrier between the encoder
+  stages and the LM engine; matches upstream convention.
+- ``create_sglang_tts_engine_executor``: runs the Higgs TTS model under
+  sglang's engine and returns ``[L, num_codebooks]`` delayed codes.
+  Prefill overlay now simply pastes the precomputed
+  ``reference_audio_embed`` at ``-100`` positions.
+- ``create_vocoder_executor``: reverse the delay pattern, decode via
+  :class:`HiggsAudioCodec` into a mono 24 kHz waveform, attach to the
+  payload so ``/v1/audio/speech`` returns WAV bytes.
 """
 
 from __future__ import annotations
@@ -267,6 +279,139 @@ def create_preprocessing_executor(
     )
 
 
+# ---------------------------------------------------------------------------
+# audio_encoder + aggregate stages
+#
+# Splits the fused-audio-embedding computation out of ``tts_engine``'s
+# prefill overlay into a dedicated pipeline stage. Mirrors the
+# ``ming_omni`` / ``qwen3_omni`` convention: the encoder stage computes
+# a modality feature, aggregate is an identity barrier, and the LM
+# engine stage sees the precomputed feature on ``state``.
+# ---------------------------------------------------------------------------
+
+
+def _load_fused_embedding_from_tts_ckpt(tts_ckpt_path: str, device: str = "cpu"):
+    """Load ONLY the fused multi-codebook embedding weight out of a TTS ckpt.
+
+    Avoids loading the full Qwen3 backbone just to compute the
+    prefill ref-audio embedding. Weight lives under the
+    ``tied.embedding.modality_embeddings.0.embedding.weight`` key.
+    """
+    import json
+    import os
+
+    from safetensors import safe_open
+
+    from sglang_omni.models.higgs_tts.hf_config import HiggsMultimodalQwen3Config
+    from sglang_omni.models.higgs_tts.modeling import HiggsFusedMultiTextEmbedding
+
+    cfg = HiggsMultimodalQwen3Config.from_pretrained(tts_ckpt_path)
+    enc_cfg = cfg.audio_encoder_config or {}
+    num_codebooks = int(enc_cfg["num_codebooks"])
+    vocab_size = int(enc_cfg["vocab_size"])
+    hidden_size = int(enc_cfg.get("out_dim", cfg.get_text_config().hidden_size))
+
+    module = HiggsFusedMultiTextEmbedding(
+        num_codebooks=num_codebooks,
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+    )
+
+    # The weight can live in a single ``model.safetensors`` or in a sharded
+    # layout with an index.json. Handle both.
+    key = "tied.embedding.modality_embeddings.0.embedding.weight"
+    index_path = os.path.join(tts_ckpt_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path) as f:
+            shard_name = json.load(f)["weight_map"].get(key)
+        if shard_name is None:
+            raise RuntimeError(
+                f"Fused embedding weight {key!r} not found in TTS ckpt index"
+            )
+        shard_path = os.path.join(tts_ckpt_path, shard_name)
+    else:
+        shard_path = os.path.join(tts_ckpt_path, "model.safetensors")
+
+    with safe_open(shard_path, framework="pt") as f:
+        tensor = f.get_tensor(key)
+
+    if tensor.shape != tuple(module.weight.shape):
+        raise RuntimeError(
+            f"Fused embedding shape mismatch: ckpt {tuple(tensor.shape)}, "
+            f"expected {tuple(module.weight.shape)}"
+        )
+    with torch.no_grad():
+        module.weight.copy_(tensor)
+
+    module = module.to(device).eval()
+    for p in module.parameters():
+        p.requires_grad_(False)
+    return module
+
+
+def build_audio_encode_fn(fused_embedding: Any, num_codebooks: int):
+    """Return the closure used by the audio_encoder stage. Exposed so
+    tests can drive it with a stub ``fused_embedding`` module."""
+
+    def _encode(payload: StagePayload) -> StagePayload:
+        state = load_state(payload)
+        codes_rows = state.reference_codes_delayed
+        if not codes_rows:
+            # Zero-shot request — nothing to encode.
+            return payload
+
+        codes = torch.tensor(codes_rows, dtype=torch.long)
+        if codes.ndim != 2 or codes.shape[1] != num_codebooks:
+            raise ValueError(
+                f"reference_codes_delayed must be [T, {num_codebooks}], "
+                f"got shape {tuple(codes.shape)}"
+            )
+        device = next(fused_embedding.parameters()).device
+        with torch.no_grad():
+            embed = fused_embedding(codes.to(device))  # [T, hidden_size]
+
+        # Serialise as nested float list so the state survives the
+        # cross-process relay unchanged. The engine stage parses it back
+        # into a tensor during prefill overlay.
+        state.reference_audio_embed = embed.float().cpu().tolist()
+        return store_state(payload, state)
+
+    return _encode
+
+
+def create_audio_encoder_executor(
+    model_path: str,
+    *,
+    device: str = "cpu",
+    num_codebooks: int = 8,
+) -> PreprocessingExecutor:
+    """Build the Higgs TTS audio_encoder stage.
+
+    Runs :class:`HiggsFusedMultiTextEmbedding` on the delayed ref-audio
+    codes produced by preprocessing to get a ``[num_ref_tokens,
+    hidden_size]`` tensor. The tensor is stashed on the state as
+    ``reference_audio_embed`` for the engine stage's prefill overlay to
+    paste at ``-100`` placeholder positions.
+
+    ``model_path`` is the TTS ckpt directory — the fused embedding
+    weight is loaded in isolation from there, not the full backbone.
+    """
+    fused = _load_fused_embedding_from_tts_ckpt(model_path, device=device)
+    return PreprocessingExecutor(build_audio_encode_fn(fused, num_codebooks))
+
+
+def create_aggregate_executor() -> PreprocessingExecutor:
+    """Identity / barrier stage — matches the ``ming_omni`` / ``qwen3_omni``
+    convention where ``aggregate`` is a pipeline sync point between the
+    encoder stages and the LM engine. No computation happens here; the
+    engine-stage prefill reads ``state.reference_audio_embed`` directly."""
+
+    def _identity(payload: StagePayload) -> StagePayload:
+        return payload
+
+    return PreprocessingExecutor(_identity)
+
+
 def create_sglang_tts_engine_executor(
     model_path: str,
     *,
@@ -328,9 +473,14 @@ def create_sglang_tts_engine_executor(
         input_ids_list = list(state.prompt_token_ids)
         input_ids = torch.tensor(input_ids_list, dtype=torch.long)
 
-        ref_codes = state.reference_codes_delayed
-        if ref_codes is not None:
-            ref_codes = torch.tensor(ref_codes, dtype=torch.long)
+        # The audio_encoder stage pre-computed this; the engine's prefill
+        # overlay just scatters it at ``-100`` positions. Pre-encoded
+        # ``reference_codes`` requests without an audio_encoder stage
+        # configured end up with ``reference_audio_embed is None`` — then
+        # no overlay runs (zero-shot semantics).
+        ref_embed = state.reference_audio_embed
+        if ref_embed is not None:
+            ref_embed = torch.tensor(ref_embed, dtype=torch.float32)
 
         # Thread top_k / top_p through sglang's SamplingParams so the
         # ``forward_batch.sampling_info`` the model reads carries them
@@ -355,7 +505,7 @@ def create_sglang_tts_engine_executor(
         return HiggsSGLangRequestData(
             input_ids=input_ids,
             req=req,
-            reference_codes_delayed=ref_codes,
+            reference_audio_embed=ref_embed,
             num_codebooks=state.num_codebooks,
             codebook_size=state.codebook_size,
             max_new_tokens=state.max_new_tokens,

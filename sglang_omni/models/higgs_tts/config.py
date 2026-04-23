@@ -25,6 +25,8 @@ from typing import ClassVar
 
 from sglang_omni.config import ExecutorConfig, PipelineConfig, RelayConfig, StageConfig
 from sglang_omni.models.higgs_tts.pipeline.next_stage import (
+    AGGREGATE_STAGE,
+    AUDIO_ENCODER_STAGE,
     PREPROCESSING_STAGE,
     TTS_ENGINE_STAGE,
     VOCODER_STAGE,
@@ -56,6 +58,23 @@ class HiggsTtsPipelineConfig(PipelineConfig):
                 },
             ),
             get_next=f"{_HIGGS_PKG}.next_stage.preprocessing_next",
+            relay=RelayConfig(device="cpu"),
+        ),
+        StageConfig(
+            name=AUDIO_ENCODER_STAGE,
+            executor=ExecutorConfig(
+                factory=f"{_HIGGS_PKG}.stages.create_audio_encoder_executor",
+                args={"device": "cpu"},
+            ),
+            get_next=f"{_HIGGS_PKG}.next_stage.audio_encoder_next",
+            relay=RelayConfig(device="cpu"),
+        ),
+        StageConfig(
+            name=AGGREGATE_STAGE,
+            executor=ExecutorConfig(
+                factory=f"{_HIGGS_PKG}.stages.create_aggregate_executor",
+            ),
+            get_next=f"{_HIGGS_PKG}.next_stage.aggregate_next",
             relay=RelayConfig(device="cpu"),
         ),
         StageConfig(

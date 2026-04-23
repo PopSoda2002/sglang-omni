@@ -21,6 +21,15 @@ class HiggsTtsState:
     """Delayed ref-audio codes, shape ``[num_ref_tokens, num_codebooks]`` as a
     nested list. ``None`` for zero-shot."""
 
+    reference_audio_embed: list[list[float]] | None = None
+    """Pre-computed fused audio embedding, shape ``[num_ref_tokens,
+    hidden_size]`` as a nested list. Produced by the ``audio_encoder``
+    stage by a single ``fused_embedding(reference_codes_delayed)`` call
+    (``HiggsFusedMultiTextEmbedding.forward`` internally sums over the
+    codebook axis, so no separate ``.sum(-2)`` is needed here). The
+    engine stage's prefill pastes this at the ``-100`` placeholder
+    positions. ``None`` for zero-shot."""
+
     num_codebooks: int = 8
     codebook_size: int = 1026  # 1024 data + <|boc|> + <|eoc|>
 
@@ -51,6 +60,8 @@ class HiggsTtsState:
         }
         if self.reference_codes_delayed is not None:
             data["reference_codes_delayed"] = self.reference_codes_delayed
+        if self.reference_audio_embed is not None:
+            data["reference_audio_embed"] = self.reference_audio_embed
         for key in ("top_p", "top_k", "seed"):
             value = getattr(self, key)
             if value is not None:
@@ -68,6 +79,7 @@ class HiggsTtsState:
         return cls(
             prompt_token_ids=list(data.get("prompt_token_ids", [])),
             reference_codes_delayed=data.get("reference_codes_delayed"),
+            reference_audio_embed=data.get("reference_audio_embed"),
             num_codebooks=data.get("num_codebooks", 8),
             codebook_size=data.get("codebook_size", 1026),
             max_new_tokens=data.get("max_new_tokens", 2048),

@@ -39,9 +39,11 @@ def test_registry_returns_higgs_tts_config_class():
     assert config_cls.__name__ == "HiggsTtsPipelineConfig"
 
 
-def test_higgs_tts_pipeline_config_has_three_stages():
+def test_higgs_tts_pipeline_config_five_stages():
     from sglang_omni.models.higgs_tts.config import HiggsTtsPipelineConfig
     from sglang_omni.models.higgs_tts.pipeline.next_stage import (
+        AGGREGATE_STAGE,
+        AUDIO_ENCODER_STAGE,
         PREPROCESSING_STAGE,
         TTS_ENGINE_STAGE,
         VOCODER_STAGE,
@@ -50,7 +52,13 @@ def test_higgs_tts_pipeline_config_has_three_stages():
     config = HiggsTtsPipelineConfig(model_path="test/higgs-tts")
 
     stage_names = [stage.name for stage in config.stages]
-    assert stage_names == [PREPROCESSING_STAGE, TTS_ENGINE_STAGE, VOCODER_STAGE]
+    assert stage_names == [
+        PREPROCESSING_STAGE,
+        AUDIO_ENCODER_STAGE,
+        AGGREGATE_STAGE,
+        TTS_ENGINE_STAGE,
+        VOCODER_STAGE,
+    ]
     assert config.entry_stage == PREPROCESSING_STAGE
     assert config.config_cls == "HiggsTtsPipelineConfig"
 
