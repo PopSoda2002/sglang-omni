@@ -149,6 +149,16 @@ class HiggsTTSModel(nn.Module):
             vocab_size=vocab_size,
             hidden_size=hidden_size,
         )
+        # Adopt the backbone's param dtype (typically bf16) for the fused
+        # embedding / head so their forward compute matches boson-vllm's
+        # inline bf16 path. Without this they'd stay in torch's default
+        # fp32 — load_weights would cast the bf16 checkpoint tensor up to
+        # fp32 — and every decode-step re-embed would accumulate 1 bf16
+        # ULP of divergence vs boson-vllm, which compounds over the AR
+        # loop and breaks quality (seed-tts WER 0.58 vs 0.02).
+        backbone_dtype = self.backbone.model.embed_tokens.weight.dtype
+        self.multimodal_embedding.to(dtype=backbone_dtype)
+        self.modality_head.to(dtype=backbone_dtype)
         if self._tie_modality:
             # Share storage with the fused embedding (matches boson-vllm behaviour).
             self.modality_head.weight = (

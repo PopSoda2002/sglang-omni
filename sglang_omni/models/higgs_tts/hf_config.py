@@ -62,6 +62,18 @@ class HiggsMultimodalQwen3Config(transformers.PretrainedConfig):
                 cfg_cls = transformers.CONFIG_MAPPING[model_type]
             except KeyError:
                 cfg_cls = None
+            # Higgs checkpoints ship the text sub-config with
+            # ``rope_theta: null``. When reconstructed via
+            # ``Qwen3Config(**text_config)`` that ``None`` falls back to
+            # transformers' Qwen3 default of ``10000`` — WRONG for Qwen3
+            # (which trains with 1e6). boson-vllm patches this via
+            # ``set_default_rope_theta(..., 1000000)``; we do the same here
+            # so sglang's rope uses the correct base. Symptom of not
+            # applying this: seed-tts WER ~0.59 vs boson-vllm's ~0.02, and
+            # greedy codes diverge between the two stacks starting row 2.
+            if model_type == "qwen3" and text_config.get("rope_theta") is None:
+                text_config = dict(text_config)
+                text_config["rope_theta"] = 1_000_000
             text_config_obj = (
                 cfg_cls(**text_config) if cfg_cls is not None else text_config
             )
@@ -75,5 +87,8 @@ class HiggsMultimodalQwen3Config(transformers.PretrainedConfig):
         text_config = self.text_config
         if isinstance(text_config, dict):
             model_type = text_config.get("model_type", "qwen3")
+            if model_type == "qwen3" and text_config.get("rope_theta") is None:
+                text_config = dict(text_config)
+                text_config["rope_theta"] = 1_000_000
             return transformers.CONFIG_MAPPING[model_type](**text_config)
         return text_config

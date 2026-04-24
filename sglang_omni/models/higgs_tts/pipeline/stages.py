@@ -340,8 +340,15 @@ def _load_fused_embedding_from_tts_ckpt(tts_ckpt_path: str, device: str = "cpu")
             f"Fused embedding shape mismatch: ckpt {tuple(tensor.shape)}, "
             f"expected {tuple(module.weight.shape)}"
         )
+    # Cast the module to bfloat16 BEFORE copying the weight, so forward
+    # compute (lookup + sum-over-codebooks) runs in bf16 — matching the
+    # engine backbone's dtype and boson-vllm's inline embed_multimodal
+    # path. If we leave the module in fp32, the summed embedding ends
+    # up with ~1 bf16 ULP more precision than boson produces, which
+    # compounds over the AR loop.
+    module = module.to(dtype=torch.bfloat16)
     with torch.no_grad():
-        module.weight.copy_(tensor)
+        module.weight.copy_(tensor.to(dtype=torch.bfloat16))
 
     module = module.to(device).eval()
     for p in module.parameters():

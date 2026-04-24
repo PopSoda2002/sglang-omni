@@ -124,6 +124,24 @@ def test_register_omni_models_adds_higgs_entry():
     assert isinstance(cfg, HiggsMultimodalQwen3Config)
 
 
+def test_text_config_patches_null_rope_theta_to_qwen3_default():
+    """Higgs checkpoints ship ``rope_theta: null`` in the text sub-config.
+    ``Qwen3Config(**dict)`` then falls back to transformers' Qwen3 default of
+    ``10000`` — but Qwen3 actually trains with ``1e6``. The config layer
+    must patch that back to ``1_000_000`` (matching boson-vllm's
+    ``set_default_rope_theta`` behaviour), otherwise positional encoding
+    is silently wrong and the model diverges from boson-vllm (seed-tts
+    greedy codes disagree starting row 2)."""
+    null_rope_text_config = dict(_TINY_TEXT_CONFIG)
+    null_rope_text_config["rope_theta"] = None
+
+    cfg = HiggsMultimodalQwen3Config(
+        audio_encoder_config=_TINY_AUDIO_ENCODER_CONFIG,
+        text_config=null_rope_text_config,
+    )
+    assert cfg.get_text_config().rope_theta == 1_000_000
+
+
 # ---------------------------------------------------------------------------
 # Instantiation
 # ---------------------------------------------------------------------------

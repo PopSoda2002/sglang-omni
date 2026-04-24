@@ -38,6 +38,7 @@ uv.lock
 results/
 .humanize/
 .benchmark-data/
+_bench_out/
 
 # AI
 .claude/
