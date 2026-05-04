@@ -11,7 +11,6 @@ the OpenAI Realtime ``turn_detection`` semantics:
 from __future__ import annotations
 
 import logging
-import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,6 +20,10 @@ logger = logging.getLogger(__name__)
 # silero-vad operates on 512-sample windows @ 16 kHz (32 ms each).
 _VAD_FRAME_SAMPLES = 512
 _VAD_SAMPLE_RATE = 16000
+
+
+class VADUnavailable(RuntimeError):
+    """Raised when silero-vad cannot be imported or instantiated."""
 
 
 @dataclass
@@ -43,22 +46,23 @@ class _Emit:
     sample_offset: int
 
 
-_model_lock = threading.Lock()
-_model_cache: object | None = None
-
-
-def _load_model() -> object:
-    global _model_cache
-    if _model_cache is not None:
-        return _model_cache
-    with _model_lock:
-        if _model_cache is not None:
-            return _model_cache
+def _load_model_instance() -> object:
+    """Construct a fresh silero-vad model. Each session owns its own
+    instance — the model carries LSTM hidden state, so sharing across
+    sessions would cross-contaminate VAD decisions under concurrency."""
+    try:
         from silero_vad import load_silero_vad  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise VADUnavailable(
+            "silero-vad is not installed; install with "
+            "`pip install silero-vad onnxruntime` or set "
+            "turn_detection.type to 'none' to disable server VAD"
+        ) from exc
 
-        _model_cache = load_silero_vad(onnx=True)
-        logger.info("silero-vad ONNX model loaded")
-        return _model_cache
+    try:
+        return load_silero_vad(onnx=True)
+    except Exception as exc:  # noqa: BLE001 — onnxruntime / model-load failures
+        raise VADUnavailable(f"silero-vad initialization failed: {exc}") from exc
 
 
 class StreamingVAD:
@@ -71,7 +75,7 @@ class StreamingVAD:
 
     def __init__(self, config: VADConfig | None = None) -> None:
         self.config = config or VADConfig()
-        self._model = _load_model()
+        self._model = _load_model_instance()
         self._leftover_pcm = bytearray()
         self._samples_consumed = 0
         self._is_speech = False

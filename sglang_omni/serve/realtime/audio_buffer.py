@@ -18,6 +18,22 @@ class AudioBufferError(ValueError):
     """Raised when the client sends malformed audio data."""
 
 
+class AudioBufferOverflow(AudioBufferError):
+    """Raised when an append would exceed the configured byte cap.
+
+    Distinct from ``AudioBufferError`` so the session layer can decide
+    to commit-and-truncate or close the connection rather than just
+    surfacing a generic invalid-request error.
+    """
+
+
+# 60 seconds @ 16 kHz mono PCM16 = 1_920_000 bytes per session by default.
+# Longer-than-1-min utterances are vanishingly rare for transcription and
+# almost always indicate a misbehaving / silent client; force a hard cap
+# so a single WebSocket can't OOM the worker.
+_DEFAULT_MAX_BUFFER_BYTES = 60 * 16000 * 2
+
+
 class RealtimeAudioBuffer:
     """Append-only buffer of raw little-endian PCM16 bytes.
 
@@ -25,6 +41,11 @@ class RealtimeAudioBuffer:
     OpenAI ``input_audio_buffer.*`` event family. Slicing emits a
     ``data:audio/wav;base64,…`` URI so the engine's IPC layer (msgpack)
     can transport the payload.
+
+    A configurable byte cap (``max_bytes``) prevents a single WebSocket
+    from growing the buffer without bound. Exceeding the cap raises
+    :class:`AudioBufferOverflow`; the session layer translates that to
+    an ``error`` event and closes the connection.
     """
 
     def __init__(
@@ -33,14 +54,20 @@ class RealtimeAudioBuffer:
         source_sr: int = 16000,
         target_sr: int = 16000,
         channels: int = 1,
+        max_bytes: int = _DEFAULT_MAX_BUFFER_BYTES,
     ) -> None:
         self._source_sr = source_sr
         self._target_sr = target_sr
         self._channels = channels
+        self._max_bytes = max_bytes
         self._buf = bytearray()
 
     def append_b64(self, audio_b64: str) -> int:
-        """Decode a base64 PCM16 chunk and append. Returns bytes appended."""
+        """Decode a base64 PCM16 chunk and append. Returns bytes appended.
+
+        Raises :class:`AudioBufferOverflow` if the resulting buffer would
+        exceed ``max_bytes`` — the buffer is left unchanged in that case.
+        """
         try:
             chunk = base64.b64decode(audio_b64, validate=False)
         except (binascii.Error, ValueError) as exc:
@@ -48,8 +75,17 @@ class RealtimeAudioBuffer:
 
         if not chunk:
             return 0
+        if len(self._buf) + len(chunk) > self._max_bytes:
+            raise AudioBufferOverflow(
+                f"audio buffer would exceed cap of {self._max_bytes} bytes "
+                f"(have {len(self._buf)}, appending {len(chunk)})"
+            )
         self._buf.extend(chunk)
         return len(chunk)
+
+    @property
+    def max_bytes(self) -> int:
+        return self._max_bytes
 
     def clear(self) -> None:
         self._buf.clear()

@@ -31,12 +31,14 @@ from sglang_omni.client import (
 )
 from sglang_omni.serve.realtime.audio_buffer import (
     AudioBufferError,
+    AudioBufferOverflow,
     RealtimeAudioBuffer,
 )
 from sglang_omni.serve.realtime.vad import (
     StreamingVAD,
     VADConfig,
     VADEvent,
+    VADUnavailable,
     offsets_to_ms,
 )
 from sglang_omni.serve.realtime.events import (
@@ -269,7 +271,24 @@ class RealtimeSession:
                 cfg_kwargs["prefix_padding_ms"] = int(td.prefix_padding_ms)
             if td.silence_duration_ms is not None:
                 cfg_kwargs["silence_duration_ms"] = int(td.silence_duration_ms)
-            self._vad = StreamingVAD(VADConfig(**cfg_kwargs))
+            try:
+                self._vad = StreamingVAD(VADConfig(**cfg_kwargs))
+            except VADUnavailable as exc:
+                # Return a recoverable config error rather than dropping
+                # the WebSocket — the client can fall back to manual mode.
+                self._vad = None
+                self._session_object.turn_detection = None
+                logger.warning(
+                    "Realtime session %s: server_vad unavailable: %s",
+                    self.session_id,
+                    exc,
+                )
+                await self._send_error(
+                    code="server_vad_unavailable",
+                    message=str(exc),
+                    event_id=event.event_id,
+                )
+                return
             logger.info(
                 "Realtime session %s: server_vad enabled (threshold=%s)",
                 self.session_id,
@@ -286,6 +305,21 @@ class RealtimeSession:
     async def _handle_audio_append(self, event: InputAudioBufferAppend) -> None:
         try:
             decoded_len = self._audio_buffer.append_b64(event.audio)
+        except AudioBufferOverflow as exc:
+            # Hard close: a client that grew the buffer past the cap is
+            # either malicious or buggy. Don't try to recover — surface a
+            # structured error and let the WebSocket loop tear down.
+            await self._send_error(
+                code="input_audio_buffer_too_large",
+                message=str(exc),
+                event_id=event.event_id,
+            )
+            self._closed = True
+            try:
+                await self.websocket.close(code=1009)  # 1009 = "message too big"
+            except Exception:  # noqa: BLE001
+                pass
+            return
         except AudioBufferError as exc:
             await self._send_error(
                 code="invalid_request_error",
@@ -332,6 +366,22 @@ class RealtimeSession:
             )
             await self._auto_commit_utterance(emit.sample_offset)
 
+    def _drop_buffer_and_reset_vad(self) -> None:
+        """Clear the audio buffer and reset VAD/utterance bookkeeping.
+
+        Used by both VAD-driven auto-commit and explicit manual commit so
+        the next utterance always starts from a clean state — without this,
+        manual ``input_audio_buffer.commit`` while ``server_vad`` is active
+        leaves the LSTM, ``_utterance_start_byte`` and the absolute-sample
+        origin pointing at the previous utterance.
+        """
+        dropped_samples = self._audio_buffer.num_samples
+        self._buffer_origin_samples += dropped_samples
+        self._audio_buffer.clear()
+        self._utterance_start_byte = None
+        if self._vad is not None:
+            self._vad.reset()
+
     async def _auto_commit_utterance(self, end_sample_offset: int) -> None:
         if self._audio_buffer.is_empty():
             return
@@ -350,12 +400,7 @@ class RealtimeSession:
         # Drop the entire buffer (committed speech + silence tail) and
         # advance the absolute origin by what we dropped — keeps future
         # speech_started/_stopped wall-clock-correct.
-        dropped_samples = self._audio_buffer.num_samples
-        self._buffer_origin_samples += dropped_samples
-        self._audio_buffer.clear()
-        self._utterance_start_byte = None
-        if self._vad is not None:
-            self._vad.reset()
+        self._drop_buffer_and_reset_vad()
 
         item_id = f"item_{uuid.uuid4().hex}"
         await self._send(
@@ -385,10 +430,7 @@ class RealtimeSession:
             self._queue_drainer = asyncio.create_task(self._drain_queue())
 
     async def _handle_audio_clear(self, event: InputAudioBufferClear) -> None:
-        self._audio_buffer.clear()
-        if self._vad is not None:
-            self._vad.reset()
-        self._utterance_start_byte = None
+        self._drop_buffer_and_reset_vad()
         await self._send(make_event("input_audio_buffer.cleared"))
 
     async def _handle_audio_commit(self, event: InputAudioBufferCommit) -> None:
@@ -402,7 +444,10 @@ class RealtimeSession:
 
         item_id = f"item_{uuid.uuid4().hex}"
         audio_payload = self._audio_buffer.to_wav_data_uri()
-        self._audio_buffer.clear()
+        # Manual commit performs the same VAD/origin reset as auto-commit
+        # so a client that mixes manual commits with active server_vad
+        # doesn't carry stale LSTM state into the next utterance.
+        self._drop_buffer_and_reset_vad()
         if audio_payload is None:
             await self._send_error(
                 code="input_audio_buffer_commit_empty",
