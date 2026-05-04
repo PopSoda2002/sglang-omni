@@ -1,0 +1,213 @@
+/* sglang-omni /v1/realtime demo — minimal vanilla CSS. */
+
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --border: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --code-bg: #0b1220;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+header .subtitle {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+
+code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+label {
+  display: block;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+input[type="text"], textarea, select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--code-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 40px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.row + .row {
+  margin-top: 12px;
+}
+
+button {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button:disabled {
+  background: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+button.danger {
+  background: var(--danger);
+}
+
+.status {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+}
+
+.status.connected { color: var(--success); }
+.status.recording { color: var(--warning); }
+.status.error { color: var(--danger); }
+
+meter {
+  flex: 1;
+  height: 10px;
+  min-width: 80px;
+}
+
+#transcripts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.utterance {
+  background: var(--code-bg);
+  border-left: 3px solid var(--accent);
+  padding: 8px 12px;
+  border-radius: 0 4px 4px 0;
+  font-size: 14px;
+}
+
+.utterance.in-progress {
+  border-left-color: var(--warning);
+}
+
+.utterance.completed {
+  border-left-color: var(--success);
+}
+
+.utterance .meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  font-family: ui-monospace, monospace;
+}
+
+.utterance .text {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+#log {
+  margin: 0;
+  padding: 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 280px;
+  overflow-y: auto;
+  white-space: pre;
+}
+
+#log .arrow-down { color: var(--accent); }
+#log .arrow-up   { color: var(--warning); }
+#log .err        { color: var(--danger); }
+
+footer {
+  text-align: center;
+  margin-top: 24px;
+  color: var(--muted);
+  font-size: 12px;
+}

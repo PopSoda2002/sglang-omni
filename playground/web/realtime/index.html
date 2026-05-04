@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sglang-omni · /v1/realtime demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>sglang-omni <code>/v1/realtime</code> demo</h1>
+      <p class="subtitle">
+        Stream microphone audio over WebSocket, watch transcription deltas
+        arrive live. Vanilla HTML/JS, no build step.
+      </p>
+    </header>
+
+    <section class="panel">
+      <label>
+        Server URL
+        <input id="ws-url" type="text" value="ws://127.0.0.1:8765/v1/realtime" />
+      </label>
+
+      <label>
+        Turn detection
+        <select id="mode">
+          <option value="manual" selected>Manual commit (press the button)</option>
+          <option value="server_vad">Server VAD (auto-commit on speech end)</option>
+        </select>
+      </label>
+
+      <label>
+        Instructions (system prompt)
+        <textarea id="instructions" rows="2">You are a realtime speech-to-text engine. Transcribe the user's spoken audio verbatim into the same language they spoke. Output ONLY the transcript.</textarea>
+      </label>
+
+      <div class="row">
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <span id="status" class="status">disconnected</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="row">
+        <button id="mic-start" disabled>Start microphone</button>
+        <button id="mic-stop" disabled>Stop microphone</button>
+        <button id="commit" disabled>Manual commit</button>
+        <button id="clear-buffer" disabled>Clear buffer</button>
+      </div>
+      <div class="row">
+        <span id="mic-status" class="status">idle</span>
+        <meter id="vu" min="0" max="1" value="0" title="Mic input level"></meter>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Transcripts</h2>
+      <div id="transcripts"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Event log</h2>
+      <div class="row">
+        <button id="clear-log">Clear log</button>
+        <label class="inline">
+          <input id="log-deltas" type="checkbox" />
+          show transcription.delta events
+        </label>
+      </div>
+      <pre id="log"></pre>
+    </section>
+
+    <footer>
+      <p>
+        See <code>sglang_omni_v1/serve/realtime/</code> for the server, and
+        <code>docs.openai.com/api-reference/realtime</code> for the protocol.
+      </p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
