@@ -38,6 +38,12 @@ from sglang_omni.serve.realtime.audio_buffer import (
     AudioBufferError,
     RealtimeAudioBuffer,
 )
+from sglang_omni.serve.realtime.vad import (
+    StreamingVAD,
+    VADConfig,
+    VADEvent,
+    offsets_to_ms,
+)
 from sglang_omni.serve.realtime.events import (
     ConversationItemCreate,
     InputAudioBufferAppend,
@@ -57,7 +63,9 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_INSTRUCTIONS = (
-    "You are a helpful realtime assistant. Reply to the user's audio."
+    "You are a realtime speech-to-text engine. Transcribe the user's "
+    "spoken audio verbatim into the same language they spoke. Output "
+    "ONLY the transcript — no descriptions, no refusals, no explanations."
 )
 
 
@@ -110,6 +118,23 @@ class RealtimeSession:
         self._active_request_id: str | None = None
         self._active_response_id: str | None = None
         self._active_task: asyncio.Task | None = None
+        # FIFO queue of pending transcription jobs (item_id, audio_payload).
+        # Server VAD can fire multiple speech_stopped events while the
+        # engine is busy on an earlier utterance; we serialize them
+        # rather than drop.
+        self._transcription_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._queue_drainer: asyncio.Task | None = None
+
+        # Server VAD (M2). None ⇒ manual mode (client must commit explicitly).
+        self._vad: StreamingVAD | None = None
+        # Sample offset of the start of the *current* audio buffer in the
+        # session's wall-clock sample timeline; used to convert VAD-relative
+        # offsets back into the absolute timeline reported in events.
+        self._buffer_origin_samples = 0
+        # Per-utterance state: when speech_started fires we snapshot the
+        # buffer's current size so that on speech_stopped we slice out
+        # only the speech segment (with prefix padding) for transcription.
+        self._utterance_start_byte: int | None = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -219,30 +244,56 @@ class RealtimeSession:
 
     async def _handle_session_update(self, event: SessionUpdate) -> None:
         cfg: SessionConfig = event.session
-        # Apply only the fields that were actually set.
-        update = cfg.model_dump(exclude_none=True)
+        # Apply only the fields that were actually set. ``exclude_none``
+        # guarantees we don't clobber existing values; ``model_dump``
+        # would otherwise serialize ``None``s for unset fields.
+        update = cfg.model_dump(exclude_none=True, exclude_unset=True)
         for key, value in update.items():
-            if hasattr(self._session_object, key):
-                setattr(self._session_object, key, value)
+            if not hasattr(self._session_object, key):
+                continue
+            # Re-validate dict values into the typed field so downstream
+            # code can rely on attribute access (e.g. turn_detection.type).
+            current = getattr(self._session_object, key)
+            if hasattr(current, "model_validate") and isinstance(value, dict):
+                value = type(current).model_validate(value)
+            elif (
+                key == "turn_detection"
+                and isinstance(value, dict)
+                and current is None
+            ):
+                from sglang_omni.serve.realtime.events import TurnDetection
 
-        # M0 supports only modalities=["text"] and pcm16 input. Reject the
-        # rest with a structured error rather than silently accepting.
+                value = TurnDetection.model_validate(value)
+            elif (
+                key == "input_audio_transcription"
+                and isinstance(value, dict)
+                and current is None
+            ):
+                from sglang_omni.serve.realtime.events import (
+                    InputAudioTranscription,
+                )
+
+                value = InputAudioTranscription.model_validate(value)
+            setattr(self._session_object, key, value)
+
+        # Currently supported: modalities=["text"] + pcm16 input, plus
+        # server_vad turn detection. Audio output (modalities=["audio"])
+        # and semantic_vad land in later milestones; reject those with
+        # a structured error rather than silently accepting.
         unsupported = []
         if self._session_object.input_audio_format != "pcm16":
             unsupported.append(
                 f"input_audio_format={self._session_object.input_audio_format!r} "
-                "(M0 supports pcm16 only)"
+                "(only pcm16 is supported)"
             )
         if "audio" in (self._session_object.modalities or []):
-            unsupported.append("modalities=['audio'] (M0 supports text-only output)")
-        if (
-            self._session_object.turn_detection
-            and self._session_object.turn_detection.type
-            and self._session_object.turn_detection.type != "none"
-        ):
             unsupported.append(
-                f"turn_detection.type="
-                f"{self._session_object.turn_detection.type!r} (server VAD lands in M2)"
+                "modalities=['audio'] is not yet supported (text-out only)"
+            )
+        td = self._session_object.turn_detection
+        if td and td.type == "semantic_vad":
+            unsupported.append(
+                "turn_detection.type='semantic_vad' is not yet implemented"
             )
 
         if unsupported:
@@ -252,6 +303,24 @@ class RealtimeSession:
                 event_id=event.event_id,
             )
             return
+
+        # (Re)configure server VAD if requested.
+        if td is None or td.type in (None, "none"):
+            self._vad = None
+        elif td.type == "server_vad":
+            cfg_kwargs: dict[str, Any] = {}
+            if td.threshold is not None:
+                cfg_kwargs["threshold"] = float(td.threshold)
+            if td.prefix_padding_ms is not None:
+                cfg_kwargs["prefix_padding_ms"] = int(td.prefix_padding_ms)
+            if td.silence_duration_ms is not None:
+                cfg_kwargs["silence_duration_ms"] = int(td.silence_duration_ms)
+            self._vad = StreamingVAD(VADConfig(**cfg_kwargs))
+            logger.info(
+                "Realtime session %s: server_vad enabled (threshold=%s)",
+                self.session_id,
+                cfg_kwargs.get("threshold", "default"),
+            )
 
         await self._send(
             make_event(
@@ -266,16 +335,124 @@ class RealtimeSession:
 
     async def _handle_audio_append(self, event: InputAudioBufferAppend) -> None:
         try:
-            self._audio_buffer.append_b64(event.audio)
+            decoded_len = self._audio_buffer.append_b64(event.audio)
         except AudioBufferError as exc:
             await self._send_error(
                 code="invalid_request_error",
                 message=str(exc),
                 event_id=event.event_id,
             )
+            return
+
+        if self._vad is None or decoded_len == 0:
+            return
+
+        # Pull the bytes we just appended back out of the buffer for VAD.
+        # `append_b64` told us how many bytes were appended; the buffer
+        # implementation is append-only so the new bytes are at the tail.
+        new_bytes = self._audio_buffer.tail(decoded_len)
+        try:
+            emits = await asyncio.to_thread(self._vad.process, new_bytes)
+        except Exception:  # noqa: BLE001
+            logger.exception("VAD inference failed")
+            return
+
+        for emit in emits:
+            await self._handle_vad_emit(emit)
+
+    async def _handle_vad_emit(self, emit: Any) -> None:
+        absolute_samples = self._buffer_origin_samples + emit.sample_offset
+        timestamp_ms = offsets_to_ms(absolute_samples)
+        if emit.type == VADEvent.SPEECH_STARTED:
+            # Map the VAD's sample offset (relative to bytes consumed by
+            # the VAD, which equals bytes appended) to a buffer byte
+            # position. With single-channel PCM16 that's offset * 2.
+            vad_byte = max(0, emit.sample_offset * 2)
+            buffer_byte = min(vad_byte, self._audio_buffer.num_bytes)
+            self._utterance_start_byte = buffer_byte
+            await self._send(
+                make_event(
+                    "input_audio_buffer.speech_started",
+                    audio_start_ms=timestamp_ms,
+                    item_id=f"item_{uuid.uuid4().hex}",
+                )
+            )
+        elif emit.type == VADEvent.SPEECH_STOPPED:
+            await self._send(
+                make_event(
+                    "input_audio_buffer.speech_stopped",
+                    audio_end_ms=timestamp_ms,
+                    item_id=f"item_{uuid.uuid4().hex}",
+                )
+            )
+            await self._auto_commit_utterance(emit.sample_offset)
+
+    async def _auto_commit_utterance(self, end_sample_offset: int) -> None:
+        """Slice [start_byte:end_byte] out of the buffer and dispatch transcription."""
+        if self._audio_buffer.is_empty():
+            return
+
+        start_byte = self._utterance_start_byte or 0
+        end_byte = min(end_sample_offset * 2, self._audio_buffer.num_bytes)
+        if end_byte <= start_byte:
+            return
+
+        # Build a one-shot audio buffer for the utterance and discard the
+        # rest — anything *after* end_byte is post-utterance silence we
+        # don't want to send to the engine.
+        utterance_payload = self._audio_buffer.slice_to_wav_data_uri(
+            start_byte=start_byte, end_byte=end_byte
+        )
+        if utterance_payload is None:
+            return
+
+        # Advance the absolute-sample origin by every sample we just dropped
+        # (committed speech *plus* the silence tail), so subsequent
+        # speech_started/_stopped events keep reporting wall-clock offsets.
+        dropped_samples = self._audio_buffer.num_samples
+        self._buffer_origin_samples += dropped_samples
+        self._audio_buffer.clear()
+        self._utterance_start_byte = None
+        if self._vad is not None:
+            # The VAD's internal sample counter is keyed to bytes-fed; since
+            # we cleared the buffer, also reset its counter so future
+            # transitions report offsets relative to the new utterance.
+            self._vad.reset()
+
+        item_id = f"item_{uuid.uuid4().hex}"
+        await self._send(
+            make_event(
+                "input_audio_buffer.committed",
+                previous_item_id=self._previous_item_id(),
+                item_id=item_id,
+            )
+        )
+        await self._send(
+            make_event(
+                "conversation.item.created",
+                previous_item_id=self._previous_item_id(),
+                item={
+                    "id": item_id,
+                    "object": "realtime.item",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_audio", "transcript": None}],
+                },
+            )
+        )
+        item = _ConversationItem(item_id=item_id, role="user")
+        self._conversation.append(item)
+
+        # FIFO-queue the utterance and ensure the drainer task is running.
+        await self._transcription_queue.put((item_id, utterance_payload))
+        if self._queue_drainer is None or self._queue_drainer.done():
+            self._queue_drainer = asyncio.create_task(self._drain_queue())
 
     async def _handle_audio_clear(self, event: InputAudioBufferClear) -> None:
         self._audio_buffer.clear()
+        if self._vad is not None:
+            self._vad.reset()
+        self._utterance_start_byte = None
         await self._send(make_event("input_audio_buffer.cleared"))
 
     async def _handle_audio_commit(self, event: InputAudioBufferCommit) -> None:
@@ -288,8 +465,18 @@ class RealtimeSession:
             return
 
         item_id = f"item_{uuid.uuid4().hex}"
-        audio_array = self._audio_buffer.to_numpy()
+        # The pipeline IPC layer (msgpack) cannot transport numpy arrays.
+        # Encode the buffer as an in-memory WAV data URI; the preprocessor
+        # stage's resource connector decodes it back to float32.
+        audio_payload = self._audio_buffer.to_wav_data_uri()
         self._audio_buffer.clear()
+        if audio_payload is None:
+            await self._send_error(
+                code="input_audio_buffer_commit_empty",
+                message="Audio buffer became empty before commit",
+                event_id=event.event_id,
+            )
+            return
 
         # Order matches OpenAI: committed → conversation.item.created →
         # transcription deltas/completed (emitted by _run_transcription).
@@ -317,19 +504,11 @@ class RealtimeSession:
         item = _ConversationItem(item_id=item_id, role="user")
         self._conversation.append(item)
 
-        # Run transcription as a background task so the WebSocket loop
-        # stays responsive to control events (commit/cancel).
-        if self._active_task is not None and not self._active_task.done():
-            await self._send_error(
-                code="response_in_progress",
-                message="A response is already in progress",
-                event_id=event.event_id,
-            )
-            return
-
-        self._active_task = asyncio.create_task(
-            self._run_transcription(item_id, audio_array)
-        )
+        # FIFO-queue the manual commit too. The drainer serializes
+        # against any in-flight utterance from server VAD.
+        await self._transcription_queue.put((item_id, audio_payload))
+        if self._queue_drainer is None or self._queue_drainer.done():
+            self._queue_drainer = asyncio.create_task(self._drain_queue())
 
     # ------------------------------------------------------------------
     # conversation.item.create
@@ -420,16 +599,44 @@ class RealtimeSession:
     # Pipeline drivers (M0 — fresh OmniRequest per commit / response)
     # ------------------------------------------------------------------
 
-    async def _run_transcription(self, item_id: str, audio_array: Any) -> None:
+    async def _drain_queue(self) -> None:
+        """Pop utterances and run them serially through ``_run_transcription``."""
+        try:
+            while not self._closed:
+                try:
+                    item_id, payload = await asyncio.wait_for(
+                        self._transcription_queue.get(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    if self._transcription_queue.empty():
+                        return
+                    continue
+
+                self._active_task = asyncio.create_task(
+                    self._run_transcription(item_id, payload)
+                )
+                try:
+                    await self._active_task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    logger.exception("transcription task failed")
+                finally:
+                    self._active_task = None
+        except asyncio.CancelledError:
+            return
+
+    async def _run_transcription(self, item_id: str, audio_payload: str) -> None:
         """Drive the engine on a freshly-committed audio segment.
 
-        Maps each text token delta to a
-        ``conversation.item.input_audio_transcription.delta`` event;
-        sends ``.completed`` on finish.
+        ``audio_payload`` is a ``data:audio/wav;base64,...`` URI; the
+        preprocessor stage's resource connector decodes it back to
+        float32. We can't pass a raw numpy array because the pipeline
+        IPC layer serializes via msgpack.
         """
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
         self._active_request_id = request_id
-        gen_req = self._build_transcription_request(audio_array)
+        gen_req = self._build_transcription_request(audio_payload)
 
         text_acc: list[str] = []
         try:
@@ -626,14 +833,14 @@ class RealtimeSession:
             max_new_tokens=max_new_tokens,
         )
 
-    def _build_transcription_request(self, audio_array: Any) -> GenerateRequest:
+    def _build_transcription_request(self, audio_payload: str) -> GenerateRequest:
         instructions = self._session_object.instructions or _DEFAULT_INSTRUCTIONS
-        # M0: model the transcription as a chat turn whose user content is
-        # an audio attachment + the standard transcription instruction.
-        # Once a dedicated streaming-ASR mode lands in M2 we can swap this.
+        # The system prompt carries the "be a transcription engine"
+        # framing; the user message is short and concrete to keep the
+        # model from drifting into description / refusal mode.
         messages = [
             Message(role="system", content=instructions),
-            Message(role="user", content="Transcribe the audio."),
+            Message(role="user", content="Transcribe the audio verbatim."),
         ]
         return GenerateRequest(
             model=self.model_name,
@@ -641,7 +848,7 @@ class RealtimeSession:
             sampling=self._base_sampling(),
             stream=True,
             output_modalities=["text"],
-            metadata={"audios": [audio_array]},
+            metadata={"audios": [audio_payload]},
         )
 
     def _build_text_response_request(self, event: ResponseCreate) -> GenerateRequest:
@@ -724,6 +931,13 @@ class RealtimeSession:
             self._active_task.cancel()
             try:
                 await self._active_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+        if self._queue_drainer is not None and not self._queue_drainer.done():
+            self._queue_drainer.cancel()
+            try:
+                await self._queue_drainer
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 

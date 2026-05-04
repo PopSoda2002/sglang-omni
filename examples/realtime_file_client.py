@@ -64,22 +64,51 @@ async def _replay(args: argparse.Namespace) -> int:
     import websockets
 
     pcm = _read_wav_pcm16_mono_16k(Path(args.audio))
+    if args.server_vad:
+        # Append a 1.5 s silence trailer so the server VAD reliably emits
+        # speech_stopped on the last utterance.
+        pcm = pcm + b"\x00\x00" * (16000 * 3 // 2)
     print(f"[client] loaded {len(pcm)} bytes ({len(pcm) // 2} samples @ 16 kHz)")
 
     chunk_samples = int(16000 * args.chunk_ms / 1000)
     chunk_bytes = chunk_samples * 2
 
     transcript_parts: list[str] = []
-    completed = asyncio.Event()
+    # Manual mode: exactly one commit ⇒ exactly one completion. Server-VAD:
+    # one completion per detected utterance, and we only know we're done
+    # after we've sent every byte AND every started utterance has
+    # produced a stop+commit+completion.
+    expected_completions = 1 if not args.server_vad else 0
+    seen_completions = 0
+    starts_seen = 0
+    stops_seen = 0
     failed: list[str] = []
+    completed = asyncio.Event()
+    audio_done = asyncio.Event()
 
     async with websockets.connect(args.url) as ws:
+
         async def receiver() -> None:
+            nonlocal seen_completions, expected_completions, starts_seen, stops_seen
             async for raw in ws:
                 event = json.loads(raw)
                 etype = event.get("type")
                 if etype == "session.created":
                     print(f"[server] session.created id={event['session']['id']}")
+                elif etype == "input_audio_buffer.speech_started":
+                    starts_seen += 1
+                    if args.server_vad:
+                        expected_completions += 1
+                    print(
+                        f"[server] speech_started @ "
+                        f"{event.get('audio_start_ms')}ms"
+                    )
+                elif etype == "input_audio_buffer.speech_stopped":
+                    stops_seen += 1
+                    print(
+                        f"[server] speech_stopped @ "
+                        f"{event.get('audio_end_ms')}ms"
+                    )
                 elif etype == "input_audio_buffer.committed":
                     print(f"[server] committed item={event['item_id']}")
                 elif etype == "conversation.item.input_audio_transcription.delta":
@@ -93,8 +122,15 @@ async def _replay(args: argparse.Namespace) -> int:
                         f"[server] transcription.completed: "
                         f"{event.get('transcript', '')!r}"
                     )
-                    completed.set()
-                    return
+                    seen_completions += 1
+                    # Done when we've shipped all audio AND every started
+                    # utterance has completed.
+                    if (
+                        audio_done.is_set()
+                        and seen_completions >= max(starts_seen, expected_completions)
+                    ):
+                        completed.set()
+                        return
                 elif etype == "conversation.item.input_audio_transcription.failed":
                     print(
                         "[server] transcription.failed: "
@@ -111,16 +147,19 @@ async def _replay(args: argparse.Namespace) -> int:
                     return
 
         async def sender() -> None:
+            session_cfg: dict[str, object] = {
+                "modalities": ["text"],
+                "input_audio_format": "pcm16",
+            }
+            if args.server_vad:
+                session_cfg["turn_detection"] = {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 600,
+                    "prefix_padding_ms": 200,
+                }
             await ws.send(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {
-                            "modalities": ["text"],
-                            "input_audio_format": "pcm16",
-                        },
-                    }
-                )
+                json.dumps({"type": "session.update", "session": session_cfg})
             )
 
             sent = 0
@@ -142,8 +181,11 @@ async def _replay(args: argparse.Namespace) -> int:
                     if delay > 0:
                         await asyncio.sleep(delay)
 
-            print(f"[client] sent {sent} bytes; committing")
-            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            print(f"[client] sent {sent} bytes")
+            if not args.server_vad:
+                print("[client] committing")
+                await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            audio_done.set()
 
         send_task = asyncio.create_task(sender())
         recv_task = asyncio.create_task(receiver())
@@ -190,6 +232,16 @@ def main() -> int:
         type=float,
         default=120.0,
         help="Overall wall-clock timeout in seconds (default: 120).",
+    )
+    parser.add_argument(
+        "--server-vad",
+        action="store_true",
+        help=(
+            "Enable server-side VAD (turn_detection=server_vad). The "
+            "client streams without an explicit commit; VAD auto-commits "
+            "each utterance. Appends 1.5s silence to ensure the last "
+            "speech_stopped fires."
+        ),
     )
     args = parser.parse_args()
     return asyncio.run(_replay(args))

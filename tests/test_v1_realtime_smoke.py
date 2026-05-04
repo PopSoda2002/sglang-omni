@@ -262,8 +262,13 @@ def test_websocket_audio_commit_emits_transcription_completed() -> None:
     assert fake.last_request is not None
     audios = fake.last_request.metadata.get("audios")
     assert audios and len(audios) == 1
-    assert isinstance(audios[0], np.ndarray)
-    assert audios[0].shape == (1600,)
+    # Audio is now serialized as a `data:audio/wav;base64,...` URI so it
+    # can survive the msgpack-based pipeline IPC boundary.
+    assert isinstance(audios[0], str)
+    assert audios[0].startswith("data:audio/wav;base64,")
+    # Round-trip: WAV header + 1600 samples × 2 bytes.
+    decoded = base64.b64decode(audios[0].split(",", 1)[1])
+    assert decoded[:4] == b"RIFF" and decoded[8:12] == b"WAVE"
 
 
 def test_websocket_audio_clear_emits_cleared() -> None:
