@@ -1,29 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pydantic models for OpenAI Realtime WebSocket events.
+"""Pydantic models for the subset of OpenAI Realtime WebSocket events
+we currently implement.
 
-The full GA / beta protocol has ~9 client events and ~28 server events. M0
-implements a usable subset for transcription:
+Reference: https://developers.openai.com/api/docs/guides/realtime
 
-Client (incoming):
-    session.update
-    input_audio_buffer.append
-    input_audio_buffer.commit
-    input_audio_buffer.clear
-    conversation.item.create   (text-only items in M0)
-    response.create            (modalities=["text"] in M0)
+Client events parsed: session.update, input_audio_buffer.append /
+.commit / .clear, conversation.item.create (text only), response.create
+(text only), response.cancel.
 
-Server (outgoing):
-    session.created / session.updated
-    input_audio_buffer.committed / .cleared
-    conversation.item.created
-    conversation.item.input_audio_transcription.delta / .completed / .failed
-    response.created / .done
-    response.text.delta / .done
-    response.audio_transcript.delta / .done
-    error
-
-Events not yet modeled (M1+) are accepted as opaque dicts on the wire and
-rejected with a structured `error` event by the session handler.
+Unsupported event types are rejected with a structured ``error`` event
+by the session dispatcher; the wire format itself stays
+forward-compatible (Pydantic models permit extra fields).
 """
 
 from __future__ import annotations
@@ -32,14 +19,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# ---------------------------------------------------------------------------
-# Common / shared
-# ---------------------------------------------------------------------------
-
 
 class _Base(BaseModel):
-    """Permissive base — Realtime events carry server-version-specific fields
-    we don't always model. Allow extras through unchanged."""
+    """Permissive base: Realtime carries server-version-specific fields
+    we don't always model — allow extras through unchanged."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -60,8 +43,7 @@ class InputAudioTranscription(_Base):
 
 
 class SessionConfig(_Base):
-    """Mutable session config. All fields optional to mirror OpenAI's
-    `session.update` semantics — only the present fields are applied."""
+    """``session.update`` payload. All fields optional — only set fields are applied."""
 
     modalities: list[str] | None = None
     instructions: str | None = None
@@ -91,11 +73,6 @@ class SessionObject(_Base):
     tool_choice: Any = "auto"
     temperature: float = 0.8
     max_response_output_tokens: int | str = "inf"
-
-
-# ---------------------------------------------------------------------------
-# Client events
-# ---------------------------------------------------------------------------
 
 
 class ClientEvent(_Base):
@@ -169,16 +146,9 @@ class ResponseCancel(ClientEvent):
     response_id: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Server events  (constructed dict-side; not parsed from wire)
-# ---------------------------------------------------------------------------
-
-
 def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
-    """Construct a server event dict suitable for `websocket.send_json`.
-
-    `event_id` is filled in by the session loop so handlers don't have to.
-    """
+    """Construct a server event dict. ``event_id`` is filled in by the
+    session loop so handlers don't have to."""
     payload: dict[str, Any] = {"type": event_type}
     for k, v in fields.items():
         if v is None:
@@ -187,17 +157,9 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
     return payload
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def parse_client_event(raw: dict[str, Any]) -> ClientEvent | None:
-    """Best-effort dispatch of a raw client event dict to a typed model.
-
-    Returns ``None`` if the type is unrecognized; the caller should emit
-    a structured `error` event back to the client.
-    """
+    """Dispatch a raw client event dict to a typed model. Returns
+    ``None`` if the ``type`` is unrecognized."""
     event_type = raw.get("type")
     if not isinstance(event_type, str):
         return None

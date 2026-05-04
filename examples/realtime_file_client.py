@@ -210,7 +210,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Replay a WAV file against /v1/realtime and print the transcript."
     )
-    parser.add_argument("audio", help="Path to a 16-bit PCM WAV (any rate, any channels).")
+    parser.add_argument(
+        "audio", help="Path to a 16-bit PCM WAV (any rate, any channels)."
+    )
     parser.add_argument(
         "--url",
         default="ws://127.0.0.1:8000/v1/realtime",

@@ -12,9 +12,10 @@ Usage::
     python examples/realtime_mic_client.py \\
         --url ws://127.0.0.1:8000/v1/realtime --chunk-ms 100
 
-Requirements: ``websockets``, ``sounddevice``, ``numpy``. M0 has no
-server-side VAD — you press ENTER to commit. Server VAD lands in M2 and
-the commit will become automatic.
+Requirements: ``websockets``, ``sounddevice``, ``numpy``. This example
+uses manual commit (press ENTER); for hands-free operation pass
+``turn_detection={"type": "server_vad"}`` in ``session.update`` and the
+server will auto-commit on speech end.
 """
 
 from __future__ import annotations

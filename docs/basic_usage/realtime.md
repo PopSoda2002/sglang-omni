@@ -126,7 +126,7 @@ Full example: `examples/realtime_translate.py`.
 
 Client → server:
 
-| event | M0/M2 status |
+| event | status |
 |---|---|
 | `session.update` | ✅ |
 | `input_audio_buffer.append` | ✅ |
@@ -138,7 +138,7 @@ Client → server:
 
 Server → client:
 
-| event | M0/M2 status |
+| event | status |
 |---|---|
 | `session.created` / `session.updated` | ✅ |
 | `input_audio_buffer.committed` / `cleared` | ✅ |

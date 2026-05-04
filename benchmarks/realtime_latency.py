@@ -16,8 +16,8 @@ Usage::
 
 Reports p50 / p95 / max for first-delta and full-transcript latency.
 The numbers are meant to be persistent — checked into
-``benchmarks/baselines/realtime_latency_h20.json`` and used by CI to
-catch regressions (M3+).
+``benchmarks/baselines/realtime_latency_<host>.json`` and used by CI
+to catch regressions.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ import base64
 import json
 import statistics
 import struct
-import sys
 import time
 import wave
 from pathlib import Path

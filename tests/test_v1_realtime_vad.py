@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Server-VAD path tests for the Realtime WebSocket endpoint (M2).
+"""Server-VAD path tests for the Realtime WebSocket endpoint.
 
 Drives the full ``/v1/realtime`` route end-to-end with a real
 silero-vad ONNX model and a fake ``Client`` so we can validate the VAD
@@ -14,7 +14,6 @@ import struct
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-import numpy as np
 import pytest
 import wave
 from fastapi.testclient import TestClient
@@ -250,7 +249,10 @@ def test_ws_server_vad_auto_commits_speech_segment() -> None:
             for _ in range(40):
                 evt = ws.receive_json()
                 collected.append(evt)
-                if evt["type"] == "conversation.item.input_audio_transcription.completed":
+                if (
+                    evt["type"]
+                    == "conversation.item.input_audio_transcription.completed"
+                ):
                     break
 
     types = [e["type"] for e in collected]

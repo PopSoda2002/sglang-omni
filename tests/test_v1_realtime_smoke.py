@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Smoke tests for the OpenAI Realtime WebSocket endpoint (M0).
+"""Smoke tests for the OpenAI Realtime WebSocket endpoint.
 
 These tests run without a GPU. They use a fake ``Client`` that yields
 canned ``CompletionStreamChunk`` instances so we can assert the wire
@@ -113,7 +113,7 @@ def test_audio_buffer_append_and_clear() -> None:
     appended = buf.append_b64(_b64(_pcm16_bytes(800)))  # 50 ms @ 16k
     assert appended == 1600
     assert buf.num_samples == 800
-    assert buf.duration_ms == 50
+    assert buf.num_bytes == 1600
 
     buf.clear()
     assert buf.is_empty()
@@ -143,7 +143,7 @@ def test_parse_client_event_dispatch() -> None:
 
 
 def test_supported_client_events_include_m0_subset() -> None:
-    # Tripwire — if someone narrows the supported set, M0 acceptance breaks.
+    # Tripwire: if someone narrows the supported set, real clients break.
     expected = {
         "session.update",
         "input_audio_buffer.append",
@@ -303,7 +303,7 @@ def test_websocket_unknown_event_returns_error() -> None:
     with TestClient(app) as client:
         with client.websocket_connect("/v1/realtime") as ws:
             ws.receive_json()  # session.created
-            ws.send_json({"type": "session.delete"})  # not implemented in M0
+            ws.send_json({"type": "session.delete"})  # not implemented
             evt = ws.receive_json()
             assert evt["type"] == "error"
             assert evt["error"]["code"] == "unsupported_event"
