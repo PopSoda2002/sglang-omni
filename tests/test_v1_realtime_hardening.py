@@ -28,10 +28,7 @@ from sglang_omni.client import (
 )
 from sglang_omni.client.types import AbortLevel
 from sglang_omni.serve.openai_api import create_app
-from sglang_omni.serve.realtime.audio_buffer import (
-    AudioBufferOverflow,
-    RealtimeAudioBuffer,
-)
+from sglang_omni.serve.realtime.audio_buffer import RealtimeAudioBuffer
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +74,7 @@ def test_session_update_returns_error_when_vad_unavailable(monkeypatch) -> None:
     def _boom():
         raise vad_module.VADUnavailable("simulated missing silero-vad")
 
-    monkeypatch.setattr(vad_module, "_load_model_instance", _boom)
+    monkeypatch.setattr(vad_module, "load_silero_model", _boom)
 
     fake = _FakeClient()
     app = create_app(fake, model_name="test", enable_realtime=True)
@@ -131,14 +128,14 @@ def test_streaming_vad_constructs_a_distinct_model_per_instance(monkeypatch) -> 
         constructed.append(m)
         return m
 
-    monkeypatch.setattr(vad_module, "_load_model_instance", _factory)
+    monkeypatch.setattr(vad_module, "load_silero_model", _factory)
 
     a = vad_module.StreamingVAD(vad_module.VADConfig())
     b = vad_module.StreamingVAD(vad_module.VADConfig())
-    assert a._model is not b._model, (
+    assert a.model is not b.model, (
         "two StreamingVAD instances must not share a model object"
     )
-    assert constructed == [a._model, b._model]
+    assert constructed == [a.model, b.model]
 
 
 # ---------------------------------------------------------------------------
@@ -148,18 +145,20 @@ def test_streaming_vad_constructs_a_distinct_model_per_instance(monkeypatch) -> 
 
 def test_audio_buffer_rejects_overflow_on_append() -> None:
     buf = RealtimeAudioBuffer(max_bytes=4000)  # 2000 samples = 125 ms
-    buf.append_b64(_b64(_pcm16(1000)))  # 2000 bytes — fits
-    with pytest.raises(AudioBufferOverflow):
-        buf.append_b64(_b64(_pcm16(1500)))  # would push past cap
+    fits_n, fits_err = buf.append_b64(_b64(_pcm16(1000)))  # 2000 bytes — fits
+    assert fits_n == 2000 and fits_err is None
+    overflow_n, overflow_err = buf.append_b64(_b64(_pcm16(1500)))
+    assert overflow_n == 0
+    assert overflow_err == "overflow"
     # Overflow leaves the buffer unchanged.
     assert buf.num_bytes == 2000
 
 
-def test_audio_buffer_overflow_extends_audio_buffer_error_hierarchy() -> None:
-    # Existing handlers that catch AudioBufferError must keep working.
-    from sglang_omni.serve.realtime.audio_buffer import AudioBufferError
-
-    assert issubclass(AudioBufferOverflow, AudioBufferError)
+def test_audio_buffer_invalid_b64_returns_error_code() -> None:
+    buf = RealtimeAudioBuffer()
+    n, err = buf.append_b64("not!!!base64!!!@@")
+    assert n == 0
+    assert err == "invalid_b64"
 
 
 def test_websocket_closes_on_oversized_append() -> None:
@@ -194,7 +193,7 @@ def test_websocket_closes_on_oversized_append() -> None:
 def test_manual_commit_resets_vad_and_origin(monkeypatch) -> None:
     """A manual commit while server_vad is configured must wipe VAD state.
 
-    Otherwise the next utterance carries stale ``_samples_consumed`` and
+    Otherwise the next utterance carries stale ``samples_consumed`` and
     LSTM hidden state from the previous turn. We verify by checking that
     the public state visible to subsequent VAD-driven events restarts
     from 0 (via the helper's contract, observed through buffer state).
@@ -216,7 +215,7 @@ def test_manual_commit_resets_vad_and_origin(monkeypatch) -> None:
         def reset_states(self):
             reset_count["n"] += 1
 
-    monkeypatch.setattr(vad_module, "_load_model_instance", lambda: _StubModel())
+    monkeypatch.setattr(vad_module, "load_silero_model", lambda: _StubModel())
 
     fake = _FakeClient(
         [
@@ -273,15 +272,15 @@ def test_manual_commit_resets_vad_and_origin(monkeypatch) -> None:
 def test_drop_buffer_and_reset_vad_helper_unifies_paths() -> None:
     """Both auto-commit and manual commit go through the same helper.
 
-    This is a structural test — if someone re-introduces an inline reset
-    in only one path, this guards against silent drift.
+    Structural test — if someone re-introduces an inline reset in only
+    one path, this guards against silent drift.
     """
     import inspect
 
     from sglang_omni.serve.realtime import session as session_module
 
     src = inspect.getsource(session_module.RealtimeSession)
-    assert src.count("_drop_buffer_and_reset_vad") >= 3, (
+    assert src.count("drop_buffer_and_reset_vad") >= 3, (
         "expected the helper to be called from "
-        "_auto_commit_utterance, _handle_audio_commit, and _handle_audio_clear"
+        "auto_commit_utterance, handle_audio_commit, and handle_audio_clear"
     )

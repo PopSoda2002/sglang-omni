@@ -13,25 +13,27 @@ import base64
 import binascii
 import io
 import wave
-
-class AudioBufferError(ValueError):
-    """Raised when the client sends malformed audio data."""
-
-
-class AudioBufferOverflow(AudioBufferError):
-    """Raised when an append would exceed the configured byte cap.
-
-    Distinct from ``AudioBufferError`` so the session layer can decide
-    to commit-and-truncate or close the connection rather than just
-    surfacing a generic invalid-request error.
-    """
-
+from contextlib import suppress
+from typing import Literal
 
 # 60 seconds @ 16 kHz mono PCM16 = 1_920_000 bytes per session by default.
 # Longer-than-1-min utterances are vanishingly rare for transcription and
 # almost always indicate a misbehaving / silent client; force a hard cap
 # so a single WebSocket can't OOM the worker.
-_DEFAULT_MAX_BUFFER_BYTES = 60 * 16000 * 2
+DEFAULT_MAX_BUFFER_BYTES = 60 * 16000 * 2
+
+
+# Error codes returned by RealtimeAudioBuffer.append_b64. Plain strings
+# rather than exception subclasses so the call site stays linear (no
+# try/except).
+AppendError = Literal["invalid_b64", "overflow"]
+
+
+def decode_audio_b64(audio_b64: str) -> bytes | None:
+    """Decode a base64 PCM16 chunk, returning ``None`` on malformed input."""
+    with suppress(binascii.Error, ValueError):
+        return base64.b64decode(audio_b64, validate=False)
+    return None
 
 
 class RealtimeAudioBuffer:
@@ -41,11 +43,6 @@ class RealtimeAudioBuffer:
     OpenAI ``input_audio_buffer.*`` event family. Slicing emits a
     ``data:audio/wav;base64,…`` URI so the engine's IPC layer (msgpack)
     can transport the payload.
-
-    A configurable byte cap (``max_bytes``) prevents a single WebSocket
-    from growing the buffer without bound. Exceeding the cap raises
-    :class:`AudioBufferOverflow`; the session layer translates that to
-    an ``error`` event and closes the connection.
     """
 
     def __init__(
@@ -54,56 +51,51 @@ class RealtimeAudioBuffer:
         source_sr: int = 16000,
         target_sr: int = 16000,
         channels: int = 1,
-        max_bytes: int = _DEFAULT_MAX_BUFFER_BYTES,
+        max_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
     ) -> None:
-        self._source_sr = source_sr
-        self._target_sr = target_sr
-        self._channels = channels
-        self._max_bytes = max_bytes
-        self._buf = bytearray()
+        self.source_sr = source_sr
+        self.target_sr = target_sr
+        self.channels = channels
+        self.max_bytes = max_bytes
+        self.buf = bytearray()
 
-    def append_b64(self, audio_b64: str) -> int:
-        """Decode a base64 PCM16 chunk and append. Returns bytes appended.
+    def append_b64(self, audio_b64: str) -> tuple[int, AppendError | None]:
+        """Decode a base64 PCM16 chunk and append it.
 
-        Raises :class:`AudioBufferOverflow` if the resulting buffer would
-        exceed ``max_bytes`` — the buffer is left unchanged in that case.
+        Returns ``(bytes_appended, error)``:
+            - ``(N, None)`` on success
+            - ``(0, "invalid_b64")`` if the base64 is malformed (buffer unchanged)
+            - ``(0, "overflow")`` if appending would exceed ``max_bytes``
+              (buffer unchanged)
+            - ``(0, None)`` if the chunk decoded to zero bytes
         """
-        try:
-            chunk = base64.b64decode(audio_b64, validate=False)
-        except (binascii.Error, ValueError) as exc:
-            raise AudioBufferError(f"Invalid base64 audio: {exc}") from exc
-
+        chunk = decode_audio_b64(audio_b64)
+        if chunk is None:
+            return 0, "invalid_b64"
         if not chunk:
-            return 0
-        if len(self._buf) + len(chunk) > self._max_bytes:
-            raise AudioBufferOverflow(
-                f"audio buffer would exceed cap of {self._max_bytes} bytes "
-                f"(have {len(self._buf)}, appending {len(chunk)})"
-            )
-        self._buf.extend(chunk)
-        return len(chunk)
-
-    @property
-    def max_bytes(self) -> int:
-        return self._max_bytes
+            return 0, None
+        if len(self.buf) + len(chunk) > self.max_bytes:
+            return 0, "overflow"
+        self.buf.extend(chunk)
+        return len(chunk), None
 
     def clear(self) -> None:
-        self._buf.clear()
+        self.buf.clear()
 
     @property
     def num_bytes(self) -> int:
-        return len(self._buf)
+        return len(self.buf)
 
     @property
     def num_samples(self) -> int:
-        return len(self._buf) // (2 * self._channels)
+        return len(self.buf) // (2 * self.channels)
 
     def is_empty(self) -> bool:
         return self.num_samples == 0
 
     def to_wav_data_uri(self) -> str | None:
         """Serialize the full buffer as a WAV data URI; ``None`` if empty."""
-        return self.slice_to_wav_data_uri(start_byte=0, end_byte=len(self._buf))
+        return self.slice_to_wav_data_uri(start_byte=0, end_byte=len(self.buf))
 
     def slice_to_wav_data_uri(
         self, *, start_byte: int, end_byte: int
@@ -114,27 +106,27 @@ class RealtimeAudioBuffer:
         Returns ``None`` if the slice is empty.
         """
         start_byte = max(0, start_byte)
-        end_byte = min(end_byte, len(self._buf))
+        end_byte = min(end_byte, len(self.buf))
         if end_byte <= start_byte:
             return None
-        bytes_per_sample = 2 * self._channels
+        bytes_per_sample = 2 * self.channels
         end_byte -= (end_byte - start_byte) % bytes_per_sample
 
-        chunk = bytes(self._buf[start_byte:end_byte])
+        chunk = bytes(self.buf[start_byte:end_byte])
         if not chunk:
             return None
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
-            wf.setnchannels(self._channels)
+            wf.setnchannels(self.channels)
             wf.setsampwidth(2)
-            wf.setframerate(self._source_sr)
+            wf.setframerate(self.source_sr)
             wf.writeframes(chunk)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         return f"data:audio/wav;base64,{b64}"
 
     def tail(self, num_bytes: int) -> bytes:
         """Return the most recently appended ``num_bytes``."""
-        if num_bytes <= 0 or not self._buf:
+        if num_bytes <= 0 or not self.buf:
             return b""
-        n = min(num_bytes, len(self._buf))
-        return bytes(self._buf[-n:])
+        n = min(num_bytes, len(self.buf))
+        return bytes(self.buf[-n:])

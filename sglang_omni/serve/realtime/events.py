@@ -15,19 +15,20 @@ forward-compatible (Pydantic models permit extra fields).
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-class _Base(BaseModel):
+class EventBase(BaseModel):
     """Permissive base: Realtime carries server-version-specific fields
     we don't always model — allow extras through unchanged."""
 
     model_config = ConfigDict(extra="allow")
 
 
-class TurnDetection(_Base):
+class TurnDetection(EventBase):
     type: Literal["server_vad", "semantic_vad", "none"] | None = None
     threshold: float | None = None
     prefix_padding_ms: int | None = None
@@ -36,13 +37,13 @@ class TurnDetection(_Base):
     interrupt_response: bool | None = None
 
 
-class InputAudioTranscription(_Base):
+class InputAudioTranscription(EventBase):
     model: str | None = None
     language: str | None = None
     prompt: str | None = None
 
 
-class SessionConfig(_Base):
+class SessionConfig(EventBase):
     """``session.update`` payload. All fields optional — only set fields are applied."""
 
     modalities: list[str] | None = None
@@ -58,7 +59,7 @@ class SessionConfig(_Base):
     max_response_output_tokens: int | str | None = None
 
 
-class SessionObject(_Base):
+class SessionObject(EventBase):
     id: str
     object: Literal["realtime.session"] = "realtime.session"
     model: str
@@ -75,7 +76,7 @@ class SessionObject(_Base):
     max_response_output_tokens: int | str = "inf"
 
 
-class ClientEvent(_Base):
+class ClientEvent(EventBase):
     event_id: str | None = None
     type: str
 
@@ -98,7 +99,7 @@ class InputAudioBufferClear(ClientEvent):
     type: Literal["input_audio_buffer.clear"]
 
 
-class ConversationItemContent(_Base):
+class ConversationItemContent(EventBase):
     type: Literal["input_text", "input_audio", "text", "item_reference"]
     text: str | None = None
     audio: str | None = None  # base64
@@ -106,7 +107,7 @@ class ConversationItemContent(_Base):
     id: str | None = None
 
 
-class ConversationItem(_Base):
+class ConversationItem(EventBase):
     id: str | None = None
     type: Literal["message", "function_call", "function_call_output"] = "message"
     role: Literal["user", "assistant", "system"] | None = None
@@ -123,7 +124,7 @@ class ConversationItemCreate(ClientEvent):
     item: ConversationItem
 
 
-class ResponseConfig(_Base):
+class ResponseConfig(EventBase):
     modalities: list[str] | None = None
     instructions: str | None = None
     voice: str | None = None
@@ -157,20 +158,7 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
     return payload
 
 
-def parse_client_event(raw: dict[str, Any]) -> ClientEvent | None:
-    """Dispatch a raw client event dict to a typed model. Returns
-    ``None`` if the ``type`` is unrecognized."""
-    event_type = raw.get("type")
-    if not isinstance(event_type, str):
-        return None
-
-    cls = _CLIENT_EVENT_TYPES.get(event_type)
-    if cls is None:
-        return None
-    return cls.model_validate(raw)
-
-
-_CLIENT_EVENT_TYPES: dict[str, type[ClientEvent]] = {
+CLIENT_EVENT_TYPES: dict[str, type[ClientEvent]] = {
     "session.update": SessionUpdate,
     "input_audio_buffer.append": InputAudioBufferAppend,
     "input_audio_buffer.commit": InputAudioBufferCommit,
@@ -181,4 +169,25 @@ _CLIENT_EVENT_TYPES: dict[str, type[ClientEvent]] = {
 }
 
 
-SUPPORTED_CLIENT_EVENT_TYPES = frozenset(_CLIENT_EVENT_TYPES.keys())
+SUPPORTED_CLIENT_EVENT_TYPES = frozenset(CLIENT_EVENT_TYPES.keys())
+
+
+def parse_client_event(raw: dict[str, Any]) -> ClientEvent | None:
+    """Dispatch a raw client event dict to a typed model.
+
+    Returns ``None`` when the ``type`` is unrecognized OR when the
+    payload fails pydantic validation. The session layer translates a
+    ``None`` into a structured ``error`` event back to the client.
+    """
+    event_type = raw.get("type")
+    if not isinstance(event_type, str):
+        return None
+
+    cls = CLIENT_EVENT_TYPES.get(event_type)
+    if cls is None:
+        return None
+
+    parsed: ClientEvent | None = None
+    with suppress(ValidationError):
+        parsed = cls.model_validate(raw)
+    return parsed

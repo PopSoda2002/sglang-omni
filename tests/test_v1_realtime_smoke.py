@@ -24,10 +24,7 @@ from sglang_omni.client import (
 from sglang_omni.client.types import AbortLevel
 from sglang_omni.preprocessing.audio import pcm16_bytes_to_float32
 from sglang_omni.serve.openai_api import create_app
-from sglang_omni.serve.realtime.audio_buffer import (
-    AudioBufferError,
-    RealtimeAudioBuffer,
-)
+from sglang_omni.serve.realtime.audio_buffer import RealtimeAudioBuffer
 from sglang_omni.serve.realtime.events import (
     SUPPORTED_CLIENT_EVENT_TYPES,
     parse_client_event,
@@ -110,7 +107,8 @@ def test_pcm16_truncates_partial_sample() -> None:
 def test_audio_buffer_append_and_clear() -> None:
     buf = RealtimeAudioBuffer()
     assert buf.is_empty()
-    appended = buf.append_b64(_b64(_pcm16_bytes(800)))  # 50 ms @ 16k
+    appended, err = buf.append_b64(_b64(_pcm16_bytes(800)))  # 50 ms @ 16k
+    assert err is None
     assert appended == 1600
     assert buf.num_samples == 800
     assert buf.num_bytes == 1600
@@ -122,8 +120,10 @@ def test_audio_buffer_append_and_clear() -> None:
 
 def test_audio_buffer_rejects_bad_base64() -> None:
     buf = RealtimeAudioBuffer()
-    with pytest.raises(AudioBufferError):
-        buf.append_b64("not!!!base64!!!@@")
+    appended, err = buf.append_b64("not!!!base64!!!@@")
+    assert appended == 0
+    assert err == "invalid_b64"
+    assert buf.is_empty()
 
 
 def test_parse_client_event_dispatch() -> None:

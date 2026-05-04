@@ -20,23 +20,23 @@ logger = logging.getLogger(__name__)
 
 class RealtimeSessionManager:
     def __init__(self, *, client: Client, model_name: str) -> None:
-        self._client = client
-        self._model_name = model_name
-        self._sessions: dict[str, RealtimeSession] = {}
+        self.client = client
+        self.model_name = model_name
+        self.sessions: dict[str, RealtimeSession] = {}
 
     def open(self, websocket: WebSocket) -> RealtimeSession:
         session = RealtimeSession(
             websocket,
-            client=self._client,
-            model_name=self._model_name,
+            client=self.client,
+            model_name=self.model_name,
         )
-        self._sessions[session.session_id] = session
+        self.sessions[session.session_id] = session
         logger.info("Realtime session opened: %s", session.session_id)
         return session
 
     def close(self, session_id: str) -> None:
-        if self._sessions.pop(session_id, None) is not None:
+        if self.sessions.pop(session_id, None) is not None:
             logger.info("Realtime session closed: %s", session_id)
 
     def active_sessions(self) -> list[str]:
-        return list(self._sessions.keys())
+        return list(self.sessions.keys())

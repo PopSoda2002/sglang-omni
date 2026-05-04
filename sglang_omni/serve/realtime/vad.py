@@ -11,15 +11,17 @@ the OpenAI Realtime ``turn_detection`` semantics:
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
+from importlib import import_module
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # silero-vad operates on 512-sample windows @ 16 kHz (32 ms each).
-_VAD_FRAME_SAMPLES = 512
-_VAD_SAMPLE_RATE = 16000
+VAD_FRAME_SAMPLES = 512
+VAD_SAMPLE_RATE = 16000
 
 
 class VADUnavailable(RuntimeError):
@@ -41,28 +43,36 @@ class VADEvent:
 
 
 @dataclass
-class _Emit:
+class Emit:
     type: str
     sample_offset: int
 
 
-def _load_model_instance() -> object:
-    """Construct a fresh silero-vad model. Each session owns its own
-    instance — the model carries LSTM hidden state, so sharing across
-    sessions would cross-contaminate VAD decisions under concurrency."""
-    try:
-        from silero_vad import load_silero_vad  # type: ignore[import-not-found]
-    except ImportError as exc:
+def load_silero_model() -> object:
+    """Construct a fresh silero-vad model instance.
+
+    Each session owns its own instance — silero carries LSTM hidden
+    state, so sharing across sessions would cross-contaminate VAD
+    decisions under concurrency. Raises :class:`VADUnavailable` on
+    import or initialization failure so the session layer can return
+    a structured error instead of crashing the WebSocket.
+    """
+    silero = None
+    with suppress(ImportError):
+        silero = import_module("silero_vad")
+    if silero is None:
         raise VADUnavailable(
             "silero-vad is not installed; install with "
             "`pip install silero-vad onnxruntime` or set "
             "turn_detection.type to 'none' to disable server VAD"
-        ) from exc
+        )
 
-    try:
-        return load_silero_vad(onnx=True)
-    except Exception as exc:  # noqa: BLE001 — onnxruntime / model-load failures
-        raise VADUnavailable(f"silero-vad initialization failed: {exc}") from exc
+    model: object | None = None
+    with suppress(Exception):
+        model = silero.load_silero_vad(onnx=True)
+    if model is None:
+        raise VADUnavailable("silero-vad initialization failed")
+    return model
 
 
 class StreamingVAD:
@@ -75,83 +85,83 @@ class StreamingVAD:
 
     def __init__(self, config: VADConfig | None = None) -> None:
         self.config = config or VADConfig()
-        self._model = _load_model_instance()
-        self._leftover_pcm = bytearray()
-        self._samples_consumed = 0
-        self._is_speech = False
-        self._silence_run_samples = 0
-        self._last_speech_offset = 0
+        self.model = load_silero_model()
+        self.leftover_pcm = bytearray()
+        self.samples_consumed = 0
+        self.is_speech = False
+        self.silence_run_samples = 0
+        self.last_speech_offset = 0
 
-    def process(self, pcm_bytes: bytes) -> list[_Emit]:
+    def process(self, pcm_bytes: bytes) -> list[Emit]:
         """Feed PCM16 LE mono @ 16 kHz; return any state transitions."""
         if not pcm_bytes:
             return []
-        self._leftover_pcm.extend(pcm_bytes)
-        emits: list[_Emit] = []
+        self.leftover_pcm.extend(pcm_bytes)
+        emits: list[Emit] = []
 
-        while len(self._leftover_pcm) >= _VAD_FRAME_SAMPLES * 2:
-            frame_bytes = bytes(self._leftover_pcm[: _VAD_FRAME_SAMPLES * 2])
-            del self._leftover_pcm[: _VAD_FRAME_SAMPLES * 2]
+        while len(self.leftover_pcm) >= VAD_FRAME_SAMPLES * 2:
+            frame_bytes = bytes(self.leftover_pcm[: VAD_FRAME_SAMPLES * 2])
+            del self.leftover_pcm[: VAD_FRAME_SAMPLES * 2]
             frame = (
                 np.frombuffer(frame_bytes, dtype="<i2").astype(np.float32) / 32768.0
             )
 
-            prob = self._infer(frame)
-            self._samples_consumed += _VAD_FRAME_SAMPLES
-            frame_end = self._samples_consumed
+            prob = self.infer(frame)
+            self.samples_consumed += VAD_FRAME_SAMPLES
+            frame_end = self.samples_consumed
             speech = prob >= self.config.threshold
 
             if speech:
-                self._silence_run_samples = 0
-                self._last_speech_offset = frame_end
-                if not self._is_speech:
-                    self._is_speech = True
+                self.silence_run_samples = 0
+                self.last_speech_offset = frame_end
+                if not self.is_speech:
+                    self.is_speech = True
                     # OpenAI's contract: speech_started reports the start
                     # offset *minus* prefix_padding so the caller includes
                     # a leading prefix in the committed audio.
                     pad = (
-                        self.config.prefix_padding_ms * _VAD_SAMPLE_RATE // 1000
+                        self.config.prefix_padding_ms * VAD_SAMPLE_RATE // 1000
                     )
-                    started_at = max(0, frame_end - _VAD_FRAME_SAMPLES - pad)
+                    started_at = max(0, frame_end - VAD_FRAME_SAMPLES - pad)
                     emits.append(
-                        _Emit(VADEvent.SPEECH_STARTED, sample_offset=started_at)
+                        Emit(VADEvent.SPEECH_STARTED, sample_offset=started_at)
                     )
             else:
-                self._silence_run_samples += _VAD_FRAME_SAMPLES
-                if self._is_speech:
+                self.silence_run_samples += VAD_FRAME_SAMPLES
+                if self.is_speech:
                     silence_threshold = (
-                        self.config.silence_duration_ms * _VAD_SAMPLE_RATE // 1000
+                        self.config.silence_duration_ms * VAD_SAMPLE_RATE // 1000
                     )
-                    if self._silence_run_samples >= silence_threshold:
-                        self._is_speech = False
+                    if self.silence_run_samples >= silence_threshold:
+                        self.is_speech = False
                         emits.append(
-                            _Emit(
+                            Emit(
                                 VADEvent.SPEECH_STOPPED,
-                                sample_offset=self._last_speech_offset,
+                                sample_offset=self.last_speech_offset,
                             )
                         )
 
         return emits
 
-    def _infer(self, frame: np.ndarray) -> float:
+    def infer(self, frame: np.ndarray) -> float:
         import torch
 
         with torch.inference_mode():
             tensor = torch.from_numpy(frame).unsqueeze(0)
-            prob = self._model(tensor, _VAD_SAMPLE_RATE).item()
+            prob = self.model(tensor, VAD_SAMPLE_RATE).item()
         return float(prob)
 
     def reset(self) -> None:
-        self._leftover_pcm.clear()
-        self._is_speech = False
-        self._silence_run_samples = 0
-        self._last_speech_offset = self._samples_consumed
-        if hasattr(self._model, "reset_states"):
-            self._model.reset_states()  # type: ignore[union-attr]
+        self.leftover_pcm.clear()
+        self.is_speech = False
+        self.silence_run_samples = 0
+        self.last_speech_offset = self.samples_consumed
+        if hasattr(self.model, "reset_states"):
+            self.model.reset_states()  # type: ignore[union-attr]
 
 
 def offsets_to_ms(samples: int) -> int:
-    return samples * 1000 // _VAD_SAMPLE_RATE
+    return samples * 1000 // VAD_SAMPLE_RATE
 
 
 def emits_for_test(pcm_bytes: bytes, **cfg) -> list[tuple[str, int]]:

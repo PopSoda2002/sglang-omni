@@ -124,18 +124,20 @@ def test_vad_silent_audio_emits_nothing() -> None:
 
 def test_vad_reset_clears_state() -> None:
     vad = StreamingVAD(VADConfig(threshold=0.5, silence_duration_ms=400))
-    vad._is_speech = True  # type: ignore[attr-defined]
-    vad._silence_run_samples = 999  # type: ignore[attr-defined]
-    vad._samples_consumed = 5000  # type: ignore[attr-defined]
+    vad.is_speech = True
+    vad.silence_run_samples = 999
+    vad.samples_consumed = 5000
     vad.reset()
-    assert vad._is_speech is False  # type: ignore[attr-defined]
-    assert vad._silence_run_samples == 0  # type: ignore[attr-defined]
+    assert vad.is_speech is False
+    assert vad.silence_run_samples == 0
 
 
 def test_audio_buffer_slice_and_tail() -> None:
     buf = RealtimeAudioBuffer()
-    raw = _silence_pcm(100)  # 1600 samples
-    buf.append_b64(_b64(raw))
+    raw = _silence_pcm(100)  # 1600 samples × 2 bytes = 3200 bytes
+    appended, err = buf.append_b64(_b64(raw))
+    assert err is None
+    assert appended == len(raw)
 
     # Tail returns the last N bytes
     last_400 = buf.tail(400)
