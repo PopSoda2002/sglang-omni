@@ -15,10 +15,9 @@ forward-compatible (Pydantic models permit extra fields).
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EventBase(BaseModel):
@@ -175,9 +174,9 @@ SUPPORTED_CLIENT_EVENT_TYPES = frozenset(CLIENT_EVENT_TYPES.keys())
 def parse_client_event(raw: dict[str, Any]) -> ClientEvent | None:
     """Dispatch a raw client event dict to a typed model.
 
-    Returns ``None`` when the ``type`` is unrecognized OR when the
-    payload fails pydantic validation. The session layer translates a
-    ``None`` into a structured ``error`` event back to the client.
+    Returns ``None`` when the ``type`` is unrecognized. A malformed
+    payload that fails pydantic validation raises
+    :class:`pydantic.ValidationError` — callers don't catch it.
     """
     event_type = raw.get("type")
     if not isinstance(event_type, str):
@@ -187,7 +186,4 @@ def parse_client_event(raw: dict[str, Any]) -> ClientEvent | None:
     if cls is None:
         return None
 
-    parsed: ClientEvent | None = None
-    with suppress(ValidationError):
-        parsed = cls.model_validate(raw)
-    return parsed
+    return cls.model_validate(raw)

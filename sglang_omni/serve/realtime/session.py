@@ -7,6 +7,11 @@ Realtime client events, accumulates audio into a ``RealtimeAudioBuffer``,
 and on each commit (manual or server-VAD-driven) builds a fresh
 ``GenerateRequest`` and streams the resulting deltas back as Realtime
 server events.
+
+Errors from the framework, parser, or engine propagate freely. The only
+"error handling" in this module is API design — functions return
+sentinel/optional values where it makes sense (e.g. ``parse_client_event``
+returns ``None`` for unrecognized event types).
 """
 
 from __future__ import annotations
@@ -15,16 +20,18 @@ import asyncio
 import json
 import logging
 import uuid
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 from starlette.websockets import WebSocketState
+
+# Starlette's receive() returns ASGI messages directly; we handle the
+# disconnect message in-band instead of catching the WebSocketDisconnect
+# exception that receive_text() would otherwise raise.
 
 from sglang_omni.client import (
     Client,
-    ClientError,
     GenerateRequest,
     Message,
     SamplingParams,
@@ -34,7 +41,6 @@ from sglang_omni.serve.realtime.vad import (
     StreamingVAD,
     VADConfig,
     VADEvent,
-    VADUnavailable,
     offsets_to_ms,
 )
 from sglang_omni.serve.realtime.events import (
@@ -70,20 +76,6 @@ class ConversationItem:
     role: str
     text: str = ""
     audio_transcript: str = ""
-
-
-def decode_payload(raw: str) -> dict[str, Any] | None:
-    """Decode a WebSocket text frame as a JSON object.
-
-    Returns ``None`` for malformed JSON or non-object top-level values
-    so the caller can emit a structured error event.
-    """
-    parsed: Any = None
-    with suppress(json.JSONDecodeError):
-        parsed = json.loads(raw)
-    if isinstance(parsed, dict):
-        return parsed
-    return None
 
 
 class RealtimeSession:
@@ -133,12 +125,13 @@ class RealtimeSession:
         self.utterance_start_byte: int | None = None
 
     async def run(self) -> None:
-        """Drive the WebSocket loop until the client disconnects or we
-        explicitly tear down (e.g. on overflow).
+        """Drive the WebSocket loop.
 
-        ``self.closed`` is the stop signal — it's set by the disconnect
-        suppress below or by a handler that closed the WS itself (e.g.
-        on input_audio_buffer overflow).
+        Uses the raw ASGI ``receive()`` instead of ``receive_text()`` so
+        a disconnect arrives as an in-band message (``"websocket.disconnect"``)
+        rather than a raised exception. The loop ends when the client
+        disconnects, when ``self.closed`` is set (e.g. on input overflow),
+        or naturally if the route is cancelled.
         """
         await self.send(
             make_event(
@@ -147,26 +140,25 @@ class RealtimeSession:
             )
         )
 
-        # ``RuntimeError`` covers the case where a handler closed the WS
-        # mid-loop and Starlette's next ``receive_text`` raises
-        # "WebSocket is not connected" — semantically the same as a
-        # disconnect for our purposes.
         while not self.closed:
-            raw_msg: str | None = None
-            with suppress(WebSocketDisconnect, RuntimeError):
-                raw_msg = await self.websocket.receive_text()
-            if raw_msg is None:
+            message = await self.websocket.receive()
+            if message["type"] == "websocket.disconnect":
                 break
-            payload = decode_payload(raw_msg)
-            if payload is None:
+            if message["type"] != "websocket.receive":
+                continue
+            raw = message.get("text")
+            if raw is None:
+                # Binary frames aren't part of the OpenAI Realtime wire
+                # format; ignore them.
+                continue
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
                 await self.send_error(
                     code="invalid_request_error",
-                    message="Invalid JSON or non-object payload",
+                    message="Top-level payload must be a JSON object",
                 )
                 continue
             await self.dispatch(payload)
-
-        await self.teardown()
 
     async def dispatch(self, payload: dict[str, Any]) -> None:
         event_type = payload.get("type")
@@ -180,11 +172,8 @@ class RealtimeSession:
 
         event = parse_client_event(payload)
         if event is None:
-            await self.send_error(
-                code="invalid_request_error",
-                message=f"Invalid payload for {event_type!r}",
-                event_id=payload.get("event_id"),
-            )
+            # Unrecognized type already filtered above; this shouldn't
+            # happen unless the supported set drifts from the registry.
             return
 
         if isinstance(event, SessionUpdate):
@@ -263,26 +252,10 @@ class RealtimeSession:
                 cfg_kwargs["prefix_padding_ms"] = int(td.prefix_padding_ms)
             if td.silence_duration_ms is not None:
                 cfg_kwargs["silence_duration_ms"] = int(td.silence_duration_ms)
-            new_vad: StreamingVAD | None = None
-            with suppress(VADUnavailable):
-                new_vad = StreamingVAD(VADConfig(**cfg_kwargs))
-            if new_vad is None:
-                self.vad = None
-                self.session_object.turn_detection = None
-                msg = (
-                    "silero-vad unavailable; install silero-vad + "
-                    "onnxruntime or set turn_detection.type to 'none'"
-                )
-                logger.warning(
-                    "Realtime session %s: server_vad unavailable", self.session_id
-                )
-                await self.send_error(
-                    code="server_vad_unavailable",
-                    message=msg,
-                    event_id=event.event_id,
-                )
-                return
-            self.vad = new_vad
+            # If silero-vad isn't installed or fails to load, the
+            # exception propagates to the caller. The route's finally
+            # clause still runs cleanup.
+            self.vad = StreamingVAD(VADConfig(**cfg_kwargs))
             logger.info(
                 "Realtime session %s: server_vad enabled (threshold=%s)",
                 self.session_id,
@@ -310,15 +283,7 @@ class RealtimeSession:
                 event_id=event.event_id,
             )
             self.closed = True
-            with suppress(Exception):
-                await self.websocket.close(code=1009)  # 1009 = "message too big"
-            return
-        if err == "invalid_b64":
-            await self.send_error(
-                code="invalid_request_error",
-                message="Invalid base64 audio",
-                event_id=event.event_id,
-            )
+            await self.websocket.close(code=1009)  # 1009 = "message too big"
             return
 
         if self.vad is None or decoded_len == 0:
@@ -358,10 +323,7 @@ class RealtimeSession:
         """Clear the audio buffer and reset VAD/utterance bookkeeping.
 
         Used by both VAD-driven auto-commit and explicit manual commit so
-        the next utterance always starts from a clean state — without
-        this, manual ``input_audio_buffer.commit`` while ``server_vad``
-        is active leaves the LSTM, ``utterance_start_byte`` and the
-        absolute-sample origin pointing at the previous utterance.
+        the next utterance always starts from a clean state.
         """
         dropped_samples = self.audio_buffer.num_samples
         self.buffer_origin_samples += dropped_samples
@@ -545,32 +507,25 @@ class RealtimeSession:
         if self.active_task is None or self.active_task.done():
             return
         if self.active_request_id is not None:
-            with suppress(Exception):
-                await self.client.abort(self.active_request_id)
+            await self.client.abort(self.active_request_id)
         self.active_task.cancel()
 
     async def drain_queue(self) -> None:
-        with suppress(asyncio.CancelledError):
-            while not self.closed:
-                fetched: tuple[str, str] | None = None
-                with suppress(asyncio.TimeoutError):
-                    fetched = await asyncio.wait_for(
-                        self.transcription_queue.get(), timeout=1.0
-                    )
-                if fetched is None:
-                    if self.transcription_queue.empty():
-                        return
-                    continue
-                item_id, payload = fetched
+        """Pop utterances and run them serially through ``run_transcription``.
 
-                self.active_task = asyncio.create_task(
-                    self.run_transcription(item_id, payload)
-                )
-                # Wait for the task; swallow non-cancellation errors (the
-                # task already emitted a transcription.failed event).
-                with suppress(Exception):
-                    await self.active_task
-                self.active_task = None
+        ``asyncio.wait`` waits without re-raising the inner task's
+        exception or cancellation, so a single failing utterance doesn't
+        kill the drainer — the task's outcome is contained.
+        """
+        while not self.closed:
+            item_id, payload = await self.transcription_queue.get()
+            self.active_task = asyncio.create_task(
+                self.run_transcription(item_id, payload)
+            )
+            await asyncio.wait({self.active_task})
+            # Retrieve any exception/result so asyncio doesn't warn at GC.
+            self.active_task.exception()
+            self.active_task = None
 
     async def run_transcription(self, item_id: str, audio_payload: str) -> None:
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
@@ -578,60 +533,46 @@ class RealtimeSession:
         gen_req = self.build_transcription_request(audio_payload)
 
         text_acc: list[str] = []
-        succeeded = False
-        # `suppress` drops ClientError / CancelledError without
-        # try/except; we detect failure by checking ``succeeded``
-        # after the block.
-        with suppress(ClientError, asyncio.CancelledError):
-            async for chunk in self.client.completion_stream(
-                gen_req, request_id=request_id
-            ):
-                if chunk.modality != "text":
-                    continue
-                if chunk.text:
-                    text_acc.append(chunk.text)
-                    await self.send(
-                        make_event(
-                            "conversation.item.input_audio_transcription.delta",
-                            item_id=item_id,
-                            content_index=0,
-                            delta=chunk.text,
-                        )
+        async for chunk in self.client.completion_stream(
+            gen_req, request_id=request_id
+        ):
+            if chunk.modality != "text":
+                continue
+            if chunk.text:
+                text_acc.append(chunk.text)
+                await self.send(
+                    make_event(
+                        "conversation.item.input_audio_transcription.delta",
+                        item_id=item_id,
+                        content_index=0,
+                        delta=chunk.text,
                     )
-                if chunk.finish_reason is not None:
-                    break
-
-            transcript = "".join(text_acc)
-            await self.send(
-                make_event(
-                    "conversation.item.input_audio_transcription.completed",
-                    item_id=item_id,
-                    content_index=0,
-                    transcript=transcript,
                 )
-            )
-            for entry in self.conversation:
-                if entry.item_id == item_id:
-                    entry.audio_transcript = transcript
-                    break
-            succeeded = True
+            if chunk.finish_reason is not None:
+                break
 
-        if not succeeded:
-            await self.send(
-                make_event(
-                    "conversation.item.input_audio_transcription.failed",
-                    item_id=item_id,
-                    content_index=0,
-                    error={
-                        "type": "engine_error",
-                        "message": "transcription failed or was cancelled",
-                    },
-                )
+        transcript = "".join(text_acc)
+        await self.send(
+            make_event(
+                "conversation.item.input_audio_transcription.completed",
+                item_id=item_id,
+                content_index=0,
+                transcript=transcript,
             )
+        )
+        for entry in self.conversation:
+            if entry.item_id == item_id:
+                entry.audio_transcript = transcript
+                break
         self.active_request_id = None
 
     async def run_text_response(self, event: ResponseCreate) -> None:
-        """Emit response.created → response.text.delta × N → text.done → done."""
+        """Emit response.created → response.text.delta × N → text.done → done.
+
+        Engine errors and cancellation propagate freely; the drainer's
+        ``asyncio.wait`` contains them. Partial events on the wire are
+        the user's accepted tradeoff for not handling errors.
+        """
         response_id = f"resp_{uuid.uuid4().hex}"
         self.active_response_id = response_id
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
@@ -655,111 +596,63 @@ class RealtimeSession:
         text_acc: list[str] = []
         finish_reason = "stop"
         usage: dict[str, Any] | None = None
-        cancelled = False
-        engine_failed = False
-
-        with suppress(asyncio.CancelledError):
-            with suppress(ClientError, Exception):
-                async for chunk in self.client.completion_stream(
-                    gen_req, request_id=request_id
-                ):
-                    if chunk.modality == "text" and chunk.text:
-                        text_acc.append(chunk.text)
-                        await self.send(
-                            make_event(
-                                "response.text.delta",
-                                response_id=response_id,
-                                item_id=item_id,
-                                output_index=0,
-                                content_index=0,
-                                delta=chunk.text,
-                            )
-                        )
-                    if chunk.finish_reason is not None:
-                        finish_reason = chunk.finish_reason
-                        if chunk.usage is not None:
-                            usage = chunk.usage.to_dict()
-                        break
-
-                transcript = "".join(text_acc)
+        async for chunk in self.client.completion_stream(
+            gen_req, request_id=request_id
+        ):
+            if chunk.modality == "text" and chunk.text:
+                text_acc.append(chunk.text)
                 await self.send(
                     make_event(
-                        "response.text.done",
+                        "response.text.delta",
                         response_id=response_id,
                         item_id=item_id,
                         output_index=0,
                         content_index=0,
-                        text=transcript,
+                        delta=chunk.text,
                     )
                 )
-                self.conversation.append(
-                    ConversationItem(
-                        item_id=item_id, role="assistant", text=transcript
-                    )
-                )
+            if chunk.finish_reason is not None:
+                finish_reason = chunk.finish_reason
+                if chunk.usage is not None:
+                    usage = chunk.usage.to_dict()
+                break
 
-                await self.send(
-                    make_event(
-                        "response.done",
-                        response={
-                            "id": response_id,
-                            "object": "realtime.response",
-                            "status": "completed",
-                            "status_details": {"reason": finish_reason},
-                            "output": [
-                                {
-                                    "id": item_id,
-                                    "object": "realtime.item",
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "content": [
-                                        {"type": "text", "text": transcript}
-                                    ],
-                                }
-                            ],
-                            "usage": usage,
-                        },
-                    )
-                )
-                self.active_request_id = None
-                self.active_response_id = None
-                return  # success path
-            engine_failed = True
-        # If we land here without `engine_failed`, an asyncio.CancelledError
-        # was suppressed (response.cancel was honored).
-        if not engine_failed:
-            cancelled = True
+        transcript = "".join(text_acc)
+        await self.send(
+            make_event(
+                "response.text.done",
+                response_id=response_id,
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                text=transcript,
+            )
+        )
+        self.conversation.append(
+            ConversationItem(item_id=item_id, role="assistant", text=transcript)
+        )
 
-        if cancelled:
-            await self.send(
-                make_event(
-                    "response.done",
-                    response={
-                        "id": response_id,
-                        "object": "realtime.response",
-                        "status": "cancelled",
-                        "output": [],
-                    },
-                )
+        await self.send(
+            make_event(
+                "response.done",
+                response={
+                    "id": response_id,
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "status_details": {"reason": finish_reason},
+                    "output": [
+                        {
+                            "id": item_id,
+                            "object": "realtime.item",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": transcript}],
+                        }
+                    ],
+                    "usage": usage,
+                },
             )
-        else:
-            await self.send_error(
-                code="engine_error",
-                message="response generation failed",
-                event_id=event.event_id,
-            )
-            await self.send(
-                make_event(
-                    "response.done",
-                    response={
-                        "id": response_id,
-                        "object": "realtime.response",
-                        "status": "failed",
-                        "status_details": {"error": "engine_error"},
-                        "output": [],
-                    },
-                )
-            )
+        )
         self.active_request_id = None
         self.active_response_id = None
 
@@ -819,12 +712,7 @@ class RealtimeSession:
             return
         if "event_id" not in event:
             event["event_id"] = f"evt_{uuid.uuid4().hex}"
-        sent = False
-        with suppress(RuntimeError, WebSocketDisconnect):
-            await self.websocket.send_text(json.dumps(event))
-            sent = True
-        if not sent:
-            self.closed = True
+        await self.websocket.send_text(json.dumps(event))
 
     async def send_error(
         self,
@@ -851,20 +739,24 @@ class RealtimeSession:
         return self.conversation[-1].item_id
 
     async def teardown(self) -> None:
+        """Cancel in-flight tasks and close the WebSocket.
+
+        Each pending task is cancelled and waited on via ``asyncio.wait``
+        which contains the resulting CancelledError. Side-task results
+        are explicitly retrieved so asyncio doesn't warn at GC.
+        """
         self.closed = True
         if self.active_task is not None and not self.active_task.done():
             if self.active_request_id is not None:
-                with suppress(Exception):
-                    await self.client.abort(self.active_request_id)
+                await self.client.abort(self.active_request_id)
             self.active_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await self.active_task
+            await asyncio.wait({self.active_task})
+            self.active_task.exception()
 
         if self.queue_drainer is not None and not self.queue_drainer.done():
             self.queue_drainer.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await self.queue_drainer
+            await asyncio.wait({self.queue_drainer})
+            self.queue_drainer.exception()
 
         if self.websocket.client_state == WebSocketState.CONNECTED:
-            with suppress(Exception):
-                await self.websocket.close()
+            await self.websocket.close()

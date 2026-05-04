@@ -11,9 +11,7 @@ the OpenAI Realtime ``turn_detection`` semantics:
 from __future__ import annotations
 
 import logging
-from contextlib import suppress
 from dataclasses import dataclass
-from importlib import import_module
 
 import numpy as np
 
@@ -22,10 +20,6 @@ logger = logging.getLogger(__name__)
 # silero-vad operates on 512-sample windows @ 16 kHz (32 ms each).
 VAD_FRAME_SAMPLES = 512
 VAD_SAMPLE_RATE = 16000
-
-
-class VADUnavailable(RuntimeError):
-    """Raised when silero-vad cannot be imported or instantiated."""
 
 
 @dataclass
@@ -53,26 +47,15 @@ def load_silero_model() -> object:
 
     Each session owns its own instance — silero carries LSTM hidden
     state, so sharing across sessions would cross-contaminate VAD
-    decisions under concurrency. Raises :class:`VADUnavailable` on
-    import or initialization failure so the session layer can return
-    a structured error instead of crashing the WebSocket.
-    """
-    silero = None
-    with suppress(ImportError):
-        silero = import_module("silero_vad")
-    if silero is None:
-        raise VADUnavailable(
-            "silero-vad is not installed; install with "
-            "`pip install silero-vad onnxruntime` or set "
-            "turn_detection.type to 'none' to disable server VAD"
-        )
+    decisions under concurrency.
 
-    model: object | None = None
-    with suppress(Exception):
-        model = silero.load_silero_vad(onnx=True)
-    if model is None:
-        raise VADUnavailable("silero-vad initialization failed")
-    return model
+    If ``silero-vad`` isn't installed or the ONNX model fails to load,
+    the underlying exception (``ImportError`` / runtime error)
+    propagates. Callers don't catch.
+    """
+    from silero_vad import load_silero_vad  # type: ignore[import-not-found]
+
+    return load_silero_vad(onnx=True)
 
 
 class StreamingVAD:

@@ -10,10 +10,8 @@ OpenAI Realtime default.
 from __future__ import annotations
 
 import base64
-import binascii
 import io
 import wave
-from contextlib import suppress
 from typing import Literal
 
 # 60 seconds @ 16 kHz mono PCM16 = 1_920_000 bytes per session by default.
@@ -24,26 +22,12 @@ DEFAULT_MAX_BUFFER_BYTES = 60 * 16000 * 2
 
 
 # Error codes returned by RealtimeAudioBuffer.append_b64. Plain strings
-# rather than exception subclasses so the call site stays linear (no
-# try/except).
-AppendError = Literal["invalid_b64", "overflow"]
-
-
-def decode_audio_b64(audio_b64: str) -> bytes | None:
-    """Decode a base64 PCM16 chunk, returning ``None`` on malformed input."""
-    with suppress(binascii.Error, ValueError):
-        return base64.b64decode(audio_b64, validate=False)
-    return None
+# rather than exception subclasses so the call site stays linear.
+AppendError = Literal["overflow"]
 
 
 class RealtimeAudioBuffer:
-    """Append-only buffer of raw little-endian PCM16 bytes.
-
-    Mutations (``append_b64``, ``clear``) correspond directly to the
-    OpenAI ``input_audio_buffer.*`` event family. Slicing emits a
-    ``data:audio/wav;base64,…`` URI so the engine's IPC layer (msgpack)
-    can transport the payload.
-    """
+    """Append-only buffer of raw little-endian PCM16 bytes."""
 
     def __init__(
         self,
@@ -64,14 +48,14 @@ class RealtimeAudioBuffer:
 
         Returns ``(bytes_appended, error)``:
             - ``(N, None)`` on success
-            - ``(0, "invalid_b64")`` if the base64 is malformed (buffer unchanged)
             - ``(0, "overflow")`` if appending would exceed ``max_bytes``
-              (buffer unchanged)
+              (buffer left unchanged)
             - ``(0, None)`` if the chunk decoded to zero bytes
+
+        Malformed base64 raises ``binascii.Error`` from
+        :func:`base64.b64decode` — callers don't catch it.
         """
-        chunk = decode_audio_b64(audio_b64)
-        if chunk is None:
-            return 0, "invalid_b64"
+        chunk = base64.b64decode(audio_b64, validate=False)
         if not chunk:
             return 0, None
         if len(self.buf) + len(chunk) > self.max_bytes:

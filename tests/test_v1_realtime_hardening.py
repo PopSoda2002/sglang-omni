@@ -68,38 +68,31 @@ def _pcm16(num_samples: int, value: int = 0) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_session_update_returns_error_when_vad_unavailable(monkeypatch) -> None:
+def test_session_update_propagates_vad_load_failure(monkeypatch) -> None:
+    """If silero-vad fails to load, the exception propagates; no graceful
+    fallback. Callers must install silero-vad + onnxruntime to use
+    server_vad; missing deps kill the session.
+    """
     from sglang_omni.serve.realtime import vad as vad_module
 
     def _boom():
-        raise vad_module.VADUnavailable("simulated missing silero-vad")
+        raise ImportError("simulated missing silero-vad")
 
     monkeypatch.setattr(vad_module, "load_silero_model", _boom)
 
     fake = _FakeClient()
     app = create_app(fake, model_name="test", enable_realtime=True)
-    with TestClient(app) as client:
-        with client.websocket_connect("/v1/realtime") as ws:
-            assert ws.receive_json()["type"] == "session.created"
-            ws.send_json(
-                {
-                    "type": "session.update",
-                    "session": {"turn_detection": {"type": "server_vad"}},
-                }
-            )
-            evt = ws.receive_json()
-            assert evt["type"] == "error", evt
-            assert evt["error"]["code"] == "server_vad_unavailable"
-            # Critically: the WS is still open. The client can fall back
-            # to manual mode without reconnecting.
-            ws.send_json(
-                {
-                    "type": "session.update",
-                    "session": {"input_audio_format": "pcm16"},
-                }
-            )
-            evt = ws.receive_json()
-            assert evt["type"] == "session.updated"
+    with pytest.raises(ImportError):
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                assert ws.receive_json()["type"] == "session.created"
+                ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {"turn_detection": {"type": "server_vad"}},
+                    }
+                )
+                ws.receive_json()  # surfaces the server-side exception
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +147,12 @@ def test_audio_buffer_rejects_overflow_on_append() -> None:
     assert buf.num_bytes == 2000
 
 
-def test_audio_buffer_invalid_b64_returns_error_code() -> None:
+def test_audio_buffer_invalid_b64_propagates() -> None:
+    import binascii
+
     buf = RealtimeAudioBuffer()
-    n, err = buf.append_b64("not!!!base64!!!@@")
-    assert n == 0
-    assert err == "invalid_b64"
+    with pytest.raises(binascii.Error):
+        buf.append_b64("not!!!base64!!!@@")
 
 
 def test_websocket_closes_on_oversized_append() -> None:

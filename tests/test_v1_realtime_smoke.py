@@ -118,12 +118,14 @@ def test_audio_buffer_append_and_clear() -> None:
     assert buf.num_bytes == 0
 
 
-def test_audio_buffer_rejects_bad_base64() -> None:
+def test_audio_buffer_propagates_bad_base64() -> None:
+    # No defensive handling: malformed base64 raises binascii.Error from
+    # base64.b64decode and propagates to the caller.
+    import binascii
+
     buf = RealtimeAudioBuffer()
-    appended, err = buf.append_b64("not!!!base64!!!@@")
-    assert appended == 0
-    assert err == "invalid_b64"
-    assert buf.is_empty()
+    with pytest.raises(binascii.Error):
+        buf.append_b64("not!!!base64!!!@@")
 
 
 def test_parse_client_event_dispatch() -> None:
@@ -309,14 +311,21 @@ def test_websocket_unknown_event_returns_error() -> None:
             assert evt["error"]["code"] == "unsupported_event"
 
 
-def test_websocket_invalid_json_returns_error() -> None:
+def test_websocket_invalid_json_kills_session() -> None:
+    """Malformed JSON is not handled — the session crashes and the WS
+    drops. Strict no-error-handling style; clients must send valid JSON.
+    The TestClient surfaces server-side exceptions, so we wrap the
+    whole flow in pytest.raises.
+    """
+    import json
+
     app, _ = _make_app([])
-    with TestClient(app) as client:
-        with client.websocket_connect("/v1/realtime") as ws:
-            ws.receive_json()  # session.created
-            ws.send_text("{not valid json")
-            evt = ws.receive_json()
-            assert evt["type"] == "error"
+    with pytest.raises(json.JSONDecodeError):
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                ws.send_text("{not valid json")
+                ws.receive_json()  # surfaces the server-side exception
 
 
 def test_websocket_response_create_emits_response_done() -> None:
