@@ -1,8 +1,11 @@
-# /v1/realtime web demo
+# Wire Service — /v1/realtime web demo
 
-Single-page vanilla HTML/JS client for `/v1/realtime`. Captures the
-microphone, streams PCM16 chunks to the WebSocket, renders transcription
-deltas live.
+![preview](preview.png)
+
+Editorial-broadsheet single-page client for `/v1/realtime`. Captures
+the microphone, streams PCM16 chunks to the WebSocket, renders
+transcription deltas live with drop caps and a vermilion in-progress
+rule. Vanilla HTML/CSS/JS — no build step.
 
 ## Run
 

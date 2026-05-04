@@ -1,15 +1,14 @@
 /**
- * sglang-omni /v1/realtime demo
+ * WIRE SERVICE — sglang-omni /v1/realtime
  *
- * - Captures mic audio via getUserMedia + AudioContext.
- * - Downsamples to 16 kHz mono PCM16, base64-encodes, and sends
- *   `input_audio_buffer.append` frames over WebSocket.
- * - Renders incoming transcription deltas live.
+ * Captures mic → 16 kHz mono PCM16 via AudioWorklet → base64-encodes →
+ * sends `input_audio_buffer.append`. Renders incoming `transcription.delta`
+ * events as italic Newsreader paragraphs with serif drop-caps; the
+ * server-VAD pill pulses while a turn is in flight; an oscilloscope
+ * canvas shows the live mic waveform.
  *
- * No build step, no framework. Targets modern browsers (Chrome / Safari /
- * Firefox with AudioWorklet). Per project style: zero error handling —
- * if something fails, the browser console gets the stack and the UI
- * shows the last known status.
+ * Vanilla — no framework, no build step, no error handling. Per house
+ * style: if something fails, the browser console gets the exception.
  */
 
 (function () {
@@ -17,64 +16,83 @@
 
   const $ = (id) => document.getElementById(id);
 
-  // -----------------------------------------------------------------------
-  // DOM refs
-  // -----------------------------------------------------------------------
-  const wsUrlEl = $("ws-url");
-  const modeEl = $("mode");
+  // ─────────────────────  DOM refs  ─────────────────────
+  const wsUrlEl       = $("ws-url");
+  const modeEl        = $("mode");
   const instructionsEl = $("instructions");
-  const connectBtn = $("connect");
+  const connectBtn    = $("connect");
   const disconnectBtn = $("disconnect");
-  const statusEl = $("status");
-  const micStartBtn = $("mic-start");
-  const micStopBtn = $("mic-stop");
-  const commitBtn = $("commit");
-  const clearBufferBtn = $("clear-buffer");
-  const micStatusEl = $("mic-status");
-  const vuEl = $("vu");
-  const transcriptsEl = $("transcripts");
-  const logEl = $("log");
-  const logDeltasEl = $("log-deltas");
-  const clearLogBtn = $("clear-log");
+  const statusEl      = $("status");
+  const statusDotEl   = $("status-dot");
+  const livePillEl    = $("live-pill");
+  const liveTextEl    = livePillEl.querySelector(".live-text");
 
-  // -----------------------------------------------------------------------
-  // State
-  // -----------------------------------------------------------------------
+  const micStartBtn   = $("mic-start");
+  const micStopBtn    = $("mic-stop");
+  const commitBtn     = $("commit");
+  const clearBufferBtn = $("clear-buffer");
+  const micStatusEl   = $("mic-status");
+  const oscilloCanvas = $("oscilloscope");
+  const oscilloCtx    = oscilloCanvas.getContext("2d");
+
+  const transcriptsEl = $("transcripts");
+  const logEl         = $("log");
+  const logDeltasEl   = $("log-deltas");
+  const clearLogBtn   = $("clear-log");
+
+  // ─────────────────────  State  ─────────────────────
   let ws = null;
   let audioCtx = null;
   let micStream = null;
   let workletNode = null;
   let analyserNode = null;
-  let vuRaf = 0;
-  // Map item_id -> DOM node showing the in-progress utterance.
-  const utteranceNodes = new Map();
-
+  let drawRaf = 0;
+  let utteranceCounter = 0;
+  const utteranceNodes = new Map();   // item_id → DOM node
+  const utteranceSerials = new Map(); // item_id → serial string
   const TARGET_SR = 16000;
 
-  // -----------------------------------------------------------------------
-  // WebSocket
-  // -----------------------------------------------------------------------
+  // ─────────────────────  Status helpers  ─────────────────────
 
-  function setStatus(text, cls = "") {
+  function setStatus(text, mode = "") {
     statusEl.textContent = text;
-    statusEl.className = "status " + cls;
+    statusDotEl.className = "status-dot" + (mode ? " " + mode : "");
   }
 
-  function setMicStatus(text, cls = "") {
-    micStatusEl.textContent = text;
-    micStatusEl.className = "status " + cls;
+  function setLive(on) {
+    if (on) {
+      livePillEl.classList.add("on");
+      liveTextEl.textContent = "ON THE WIRE";
+    } else {
+      livePillEl.classList.remove("on");
+      liveTextEl.textContent = "OFFLINE";
+    }
   }
+
+  function setMicStatus(text) {
+    micStatusEl.textContent = text;
+  }
+
+  // ─────────────────────  Wire feed log  ─────────────────────
 
   function logEntry(direction, payload) {
     const t = payload && payload.type;
-    if (t === "conversation.item.input_audio_transcription.delta" && !logDeltasEl.checked) {
+    if (
+      t === "conversation.item.input_audio_transcription.delta" &&
+      !logDeltasEl.checked
+    ) {
       return;
     }
     const arrow = direction === "in" ? "←" : "→";
     const cls = direction === "in" ? "arrow-down" : "arrow-up";
-    const summary = JSON.stringify(payload).slice(0, 240);
+    const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
+    const summary = JSON.stringify(payload).slice(0, 280);
     const line = document.createElement("div");
-    line.innerHTML = `<span class="${cls}">${arrow}</span> ${escapeHtml(summary)}`;
+    line.className = "row";
+    line.innerHTML =
+      `<span class="ts">${ts}</span>` +
+      `<span class="${cls}">${arrow}</span> ` +
+      escapeHtml(summary);
     logEl.appendChild(line);
     logEl.scrollTop = logEl.scrollHeight;
   }
@@ -86,6 +104,8 @@
     }[c]));
   }
 
+  // ─────────────────────  WebSocket  ─────────────────────
+
   function wsSend(payload) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify(payload));
@@ -95,10 +115,11 @@
   connectBtn.addEventListener("click", () => {
     const url = wsUrlEl.value.trim();
     ws = new WebSocket(url);
-    setStatus("connecting…");
+    setStatus("Opening line…");
 
     ws.onopen = () => {
-      setStatus("connected", "connected");
+      setStatus("Wire open", "connected");
+      setLive(true);
       connectBtn.disabled = true;
       disconnectBtn.disabled = false;
       micStartBtn.disabled = false;
@@ -126,7 +147,8 @@
     };
 
     ws.onclose = () => {
-      setStatus("disconnected");
+      setStatus("Standing by");
+      setLive(false);
       connectBtn.disabled = false;
       disconnectBtn.disabled = true;
       micStartBtn.disabled = true;
@@ -138,7 +160,7 @@
     };
 
     ws.onerror = () => {
-      setStatus("error", "error");
+      setStatus("Wire error", "error");
     };
   });
 
@@ -146,9 +168,7 @@
     if (ws) ws.close();
   });
 
-  // -----------------------------------------------------------------------
-  // Microphone capture + PCM16 streaming
-  // -----------------------------------------------------------------------
+  // ─────────────────────  Microphone  ─────────────────────
 
   micStartBtn.addEventListener("click", () => startMic());
   micStopBtn.addEventListener("click", () => stopMic());
@@ -167,8 +187,6 @@
 
     const source = audioCtx.createMediaStreamSource(micStream);
 
-    // Define an inline AudioWorklet that emits Float32 frames; we
-    // resample (if needed) and convert to PCM16 in the main thread.
     const workletCode = `
       class Forwarder extends AudioWorkletProcessor {
         process(inputs) {
@@ -188,44 +206,34 @@
     workletNode.port.onmessage = (e) => onAudioFrame(e.data);
 
     analyserNode = audioCtx.createAnalyser();
-    analyserNode.fftSize = 256;
+    analyserNode.fftSize = 1024;
+    analyserNode.smoothingTimeConstant = 0.6;
 
     source.connect(workletNode);
     source.connect(analyserNode);
-    // workletNode does not connect to destination — we don't want to
-    // hear ourselves.
 
-    setMicStatus("recording", "recording");
+    setMicStatus("Channel hot");
     micStartBtn.disabled = true;
     micStopBtn.disabled = false;
     commitBtn.disabled = modeEl.value === "server_vad";
     clearBufferBtn.disabled = false;
-    pumpVU();
+    drawScope();
   }
 
   function stopMic() {
-    if (workletNode) {
-      workletNode.disconnect();
-      workletNode = null;
-    }
-    if (analyserNode) {
-      analyserNode.disconnect();
-      analyserNode = null;
-    }
-    if (audioCtx) {
-      audioCtx.close();
-      audioCtx = null;
-    }
+    if (workletNode) { workletNode.disconnect(); workletNode = null; }
+    if (analyserNode) { analyserNode.disconnect(); analyserNode = null; }
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
     if (micStream) {
       micStream.getTracks().forEach((t) => t.stop());
       micStream = null;
     }
-    if (vuRaf) {
-      cancelAnimationFrame(vuRaf);
-      vuRaf = 0;
+    if (drawRaf) {
+      cancelAnimationFrame(drawRaf);
+      drawRaf = 0;
     }
-    vuEl.value = 0;
-    setMicStatus("idle");
+    clearScope();
+    setMicStatus("Channel cold");
     micStopBtn.disabled = true;
     commitBtn.disabled = true;
     clearBufferBtn.disabled = true;
@@ -235,9 +243,6 @@
   }
 
   function onAudioFrame(float32) {
-    // The AudioContext is constructed at TARGET_SR so the worklet
-    // already delivers frames at 16 kHz. Convert Float32 [-1,1] →
-    // PCM16 little-endian.
     const pcm16 = new Int16Array(float32.length);
     for (let i = 0; i < float32.length; i++) {
       const s = Math.max(-1, Math.min(1, float32[i]));
@@ -259,81 +264,106 @@
     return btoa(binary);
   }
 
-  // VU meter
-  function pumpVU() {
-    if (!analyserNode) return;
-    const buf = new Uint8Array(analyserNode.fftSize);
-    analyserNode.getByteTimeDomainData(buf);
-    let peak = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const v = Math.abs(buf[i] - 128) / 128;
-      if (v > peak) peak = v;
-    }
-    vuEl.value = peak;
-    vuRaf = requestAnimationFrame(pumpVU);
+  // ─────────────────────  Oscilloscope  ─────────────────────
+
+  function clearScope() {
+    const w = oscilloCanvas.width;
+    const h = oscilloCanvas.height;
+    oscilloCtx.clearRect(0, 0, w, h);
   }
 
-  // -----------------------------------------------------------------------
-  // Server event handlers
-  // -----------------------------------------------------------------------
+  function drawScope() {
+    if (!analyserNode) return;
+    const w = oscilloCanvas.width;
+    const h = oscilloCanvas.height;
+    const buf = new Uint8Array(analyserNode.fftSize);
+    analyserNode.getByteTimeDomainData(buf);
+
+    oscilloCtx.clearRect(0, 0, w, h);
+
+    // Faint baseline.
+    oscilloCtx.strokeStyle = "rgba(26, 24, 20, 0.18)";
+    oscilloCtx.lineWidth = 1;
+    oscilloCtx.beginPath();
+    oscilloCtx.moveTo(0, h / 2);
+    oscilloCtx.lineTo(w, h / 2);
+    oscilloCtx.stroke();
+
+    // Waveform — vermilion ink.
+    oscilloCtx.strokeStyle = "#c5392b";
+    oscilloCtx.lineWidth = 1.5;
+    oscilloCtx.lineJoin = "round";
+    oscilloCtx.beginPath();
+    const slice = w / buf.length;
+    let x = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const v = (buf[i] - 128) / 128.0;
+      const y = h / 2 + v * (h / 2) * 0.95;
+      if (i === 0) oscilloCtx.moveTo(x, y);
+      else oscilloCtx.lineTo(x, y);
+      x += slice;
+    }
+    oscilloCtx.stroke();
+
+    drawRaf = requestAnimationFrame(drawScope);
+  }
+
+  // ─────────────────────  Server events  ─────────────────────
 
   function handleServerEvent(evt) {
     switch (evt.type) {
       case "session.created":
       case "session.updated":
-        // Surface model / config in the status line.
         if (evt.session && evt.session.id) {
-          setStatus(`session ${evt.session.id}`, "connected");
+          setStatus(`session ${evt.session.id.slice(0, 12)}…`, "connected");
         }
         return;
 
       case "input_audio_buffer.speech_started":
         ensureUtterance(evt.item_id, "in-progress");
-        setItemMeta(evt.item_id,
-          `speech_started @ ${evt.audio_start_ms}ms`);
+        setItemMeta(evt.item_id, `started ${ms(evt.audio_start_ms)}`);
         return;
 
       case "input_audio_buffer.speech_stopped":
-        setItemMeta(evt.item_id,
-          `speech_stopped @ ${evt.audio_end_ms}ms`);
+        setItemMeta(evt.item_id, `stopped ${ms(evt.audio_end_ms)}`);
         return;
 
       case "input_audio_buffer.committed":
         ensureUtterance(evt.item_id, "in-progress");
-        setItemMeta(evt.item_id, "committed — transcribing…");
+        setItemMeta(evt.item_id, "committed · transcribing");
         return;
 
       case "conversation.item.input_audio_transcription.delta": {
         const node = ensureUtterance(evt.item_id, "in-progress");
-        node.querySelector(".text").textContent += evt.delta || "";
+        const body = node.querySelector(".utterance-body");
+        body.textContent += evt.delta || "";
         return;
       }
 
       case "conversation.item.input_audio_transcription.completed": {
         const node = ensureUtterance(evt.item_id, "completed");
-        node.classList.remove("in-progress");
-        node.classList.add("completed");
-        node.querySelector(".text").textContent = evt.transcript || "";
+        node.dataset.state = "completed";
+        const body = node.querySelector(".utterance-body");
+        body.textContent = evt.transcript || body.textContent;
         setItemMeta(evt.item_id, "completed");
         return;
       }
 
       case "conversation.item.input_audio_transcription.failed": {
-        const node = ensureUtterance(evt.item_id, "completed");
-        setItemMeta(evt.item_id,
-          `failed: ${evt.error && evt.error.message}`);
-        node.querySelector(".text").textContent +=
-          "  [transcription failed]";
+        const node = ensureUtterance(evt.item_id, "failed");
+        node.dataset.state = "failed";
+        setItemMeta(
+          evt.item_id,
+          "failed: " + ((evt.error && evt.error.message) || "unknown"),
+        );
         return;
       }
 
       case "error":
-        setStatus(`error: ${evt.error && evt.error.code}`, "error");
+        setStatus("error: " + (evt.error && evt.error.code), "error");
         return;
 
       default:
-        // Other events (response.*, conversation.item.created without
-        // tracked id, etc.) are visible in the event log.
         return;
     }
   }
@@ -341,31 +371,47 @@
   function ensureUtterance(itemId, state) {
     let node = utteranceNodes.get(itemId);
     if (node) return node;
-    node = document.createElement("div");
-    node.className = "utterance " + state;
+
+    const empty = transcriptsEl.querySelector(".empty-state");
+    if (empty) empty.remove();
+
+    utteranceCounter += 1;
+    const serial = "№ " + String(utteranceCounter).padStart(3, "0");
+    utteranceSerials.set(itemId, serial);
+
+    node = document.createElement("article");
+    node.className = "utterance";
+    node.dataset.state = state;
     node.innerHTML =
-      `<div class="meta">${escapeHtml(itemId || "")}</div>` +
-      `<div class="text"></div>`;
+      `<div class="utterance-meta">` +
+      `<span class="serial">${serial}</span>` +
+      `<span class="ts">${nowTime()}</span>` +
+      `<span class="state">opening</span>` +
+      `</div>` +
+      `<p class="utterance-body"></p>`;
     transcriptsEl.appendChild(node);
     transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
     utteranceNodes.set(itemId, node);
     return node;
   }
 
-  function setItemMeta(itemId, text) {
+  function setItemMeta(itemId, stateText) {
     const node = utteranceNodes.get(itemId);
     if (!node) return;
-    const meta = node.querySelector(".meta");
-    meta.textContent = `${itemId} · ${text}`;
+    const stateEl = node.querySelector(".utterance-meta .state");
+    if (stateEl) stateEl.textContent = stateText;
   }
 
-  // -----------------------------------------------------------------------
-  // Misc UI
-  // -----------------------------------------------------------------------
+  function ms(n) { return typeof n === "number" ? n + "ms" : ""; }
+
+  function nowTime() {
+    return new Date().toLocaleTimeString("en-GB", { hour12: false });
+  }
+
+  // ─────────────────────  Misc UI  ─────────────────────
 
   modeEl.addEventListener("change", () => {
     if (audioCtx) {
-      // re-evaluate manual-commit button state when mode toggles mid-recording
       commitBtn.disabled = modeEl.value === "server_vad";
     }
   });
