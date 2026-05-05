@@ -24,9 +24,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from typing import Any
 
 from sglang_omni.models.qwen3_omni.config import Qwen3OmniPipelineConfig
 from sglang_omni.serve import launch_server
+from sglang_omni.utils import print_server_version_banner
 
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
@@ -51,12 +53,6 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="GB of model weights to offload to CPU",
     )
-    parser.add_argument(
-        "--mem-fraction-static",
-        type=float,
-        default=None,
-        help="Fraction of GPU memory for KV cache",
-    )
 
     # Pipeline options
     parser.add_argument(
@@ -66,7 +62,46 @@ def parse_args() -> argparse.Namespace:
         choices=["shm", "nccl", "nixl"],
         help="Relay type for inter-stage data transfer",
     )
-
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static for the thinker stage. "
+            "If omitted, SGLang chooses automatically."
+        ),
+    )
+    parser.add_argument(
+        "--encoder-mem-reserve",
+        type=float,
+        default=None,
+        help=(
+            "GPU-memory fraction kept OUT of SGLang's static pool (model weights "
+            "+ KV cache) and left free for the co-located vision/audio encoder's "
+            "weights and activations on the thinker GPU.\n"
+            "Behavior across the four flag combinations of --mem-fraction-static "
+            "and --encoder-mem-reserve:\n"
+            "  (1) neither flag passed: SGLang auto-selects mem_fraction_static "
+            "and the default reserve 0.05 is subtracted;\n"
+            "  (2) only --encoder-mem-reserve X: SGLang auto-selects "
+            "mem_fraction_static and X is subtracted;\n"
+            "  (3) only --mem-fraction-static X: X is used verbatim and the "
+            "default reserve is ignored;\n"
+            "  (4) both flags: rejected at CLI as mutually exclusive.\n"
+            "Default 0.05 is tuned for single-request / short-video workloads; "
+            "raise to 0.15-0.20 for high-concurrency long-video or long-audio "
+            "workloads."
+        ),
+    )
+    # Note (Chenyang): Add for V1.
+    parser.add_argument(
+        "--version",
+        type=str,
+        default=os.environ.get("SGLANG_OMNI_SERVER_VERSION", "legacy"),
+        choices=["legacy", "v1"],
+        help="Select the legacy or v1 Qwen3 launcher implementation.",
+    )
+    # Note (Chenyang): Add for V1.
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -80,28 +115,133 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def _check_mem_flag_mutex(
+    mem_fraction_static: float | None,
+    encoder_mem_reserve: float | None,
+) -> None:
+    """Reject passing both --mem-fraction-static and --encoder-mem-reserve."""
+    if mem_fraction_static is not None and encoder_mem_reserve is not None:
+        raise ValueError(
+            "--mem-fraction-static and --encoder-mem-reserve are mutually "
+            "exclusive: --mem-fraction-static pins the pool size directly "
+            "and the reserve only subtracts from SGLang's auto-selected "
+            "value. Pass only one."
+        )
 
-    overrides = {}
-    if args.cpu_offload_gb:
-        overrides["cpu_offload_gb"] = args.cpu_offload_gb
-    if args.mem_fraction_static is not None:
-        overrides["mem_fraction_static"] = args.mem_fraction_static
+
+# Note (Chenyang): Add for V1.
+
+
+def _validate_fraction(flag_name: str, value: float | None) -> None:
+    if value is not None and not 0.0 < value < 1.0:
+        raise ValueError(f"{flag_name} must be > 0 and < 1, got {value}")
+
+
+def _apply_stage_factory_updates(
+    config: Any,
+    *,
+    stage_name: str,
+    updates: dict[str, object],
+    server_arg_updates: dict[str, object] | None = None,
+) -> None:
+    for stage in config.stages:
+        if stage.name != stage_name:
+            continue
+
+        factory_args = dict(stage.factory_args or {})
+        factory_args.update(updates)
+        if server_arg_updates:
+            overrides = dict(factory_args.get("server_args_overrides") or {})
+            overrides.update(server_arg_updates)
+            factory_args["server_args_overrides"] = overrides
+        stage.factory_args = factory_args
+        return
+
+    raise ValueError(
+        f"Stage {stage_name!r} not found in config {type(config).__name__}"
+    )
+
+
+def _launch_v1_text_server(args: argparse.Namespace) -> None:
+    from sglang_omni_v1.models.qwen3_omni.config import Qwen3OmniPipelineConfig
+    from sglang_omni_v1.serve import launch_server as launch_v1_server
+
+    _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
 
     config = Qwen3OmniPipelineConfig(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
-        server_args_overrides=overrides or None,
     )
 
-    # Override thinker_max_seq_len in stage executor args if provided
+    stage_updates: dict[str, object] = {}
     if args.thinker_max_seq_len is not None:
-        for stage in config.stages:
-            if stage.name == "thinker":
-                if stage.executor.args is None:
-                    stage.executor.args = {}
-                stage.executor.args["thinker_max_seq_len"] = args.thinker_max_seq_len
+        stage_updates["thinker_max_seq_len"] = int(args.thinker_max_seq_len)
+
+    server_arg_updates: dict[str, object] = {}
+    if args.cpu_offload_gb:
+        server_arg_updates["cpu_offload_gb"] = int(args.cpu_offload_gb)
+    if args.mem_fraction_static is not None:
+        server_arg_updates["mem_fraction_static"] = args.mem_fraction_static
+
+    if stage_updates or server_arg_updates:
+        _apply_stage_factory_updates(
+            config,
+            stage_name="thinker",
+            updates=stage_updates,
+            server_arg_updates=server_arg_updates or None,
+        )
+    if stage_updates:
+        _apply_stage_factory_updates(
+            config,
+            stage_name="preprocessing",
+            updates=stage_updates,
+        )
+
+    launch_v1_server(
+        config,
+        host=args.host,
+        port=args.port,
+        model_name=args.model_name,
+    )
+
+
+# Note (Chenyang): Add for V1.
+
+
+def main() -> None:
+    args = parse_args()
+    print_server_version_banner(args.version, entry="examples/run_qwen3_omni_server.py")
+    # Note (Chenyang): Add for V1.
+    if args.version == "v1":
+        _launch_v1_text_server(args)
+        return
+    # Note (Chenyang): Add for V1.
+
+    _check_mem_flag_mutex(args.mem_fraction_static, args.encoder_mem_reserve)
+
+    overrides = {}
+    if args.thinker_max_seq_len is not None:
+        overrides["thinker_max_seq_len"] = args.thinker_max_seq_len
+    if args.cpu_offload_gb:
+        overrides["cpu_offload_gb"] = args.cpu_offload_gb
+    if args.encoder_mem_reserve is not None:
+        overrides["encoder_mem_reserve"] = args.encoder_mem_reserve
+
+    config = Qwen3OmniPipelineConfig(
+        model_path=args.model_path,
+        relay_backend=args.relay_backend,
+    )
+    if overrides:
+        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
+    if args.mem_fraction_static is not None:
+        if not 0.0 < args.mem_fraction_static < 1.0:
+            raise ValueError(
+                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
+            )
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={"mem_fraction_static": args.mem_fraction_static},
+        )
 
     launch_server(
         config,

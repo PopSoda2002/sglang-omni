@@ -29,14 +29,16 @@ CI runs on a subset and has its own thresholds elsewhere (see tasks/*.py).
 
 Benchmark: MMMU     |  Dataset: MMMU_val (900 samples, all 30 subjects)
 Hardware:  1 x H200 (default; non-H200 sources are tagged in Source column)
-Last verified: 2026-04-18
+Last verified: 2026-05-04
 
 Accuracy (summary)
 
 | Model      | Config             | accuracy | correct | failed | mc_fallback | Source                                                 |
 | ---------- | ------------------ | -------- | ------- | ------ | ----------- | ------------------------------------------------------ |
-| Qwen3-Omni | enable_audio=False | 67.22%   | 605/900 | 0      | 21          | PR #316 [H200, full-set, c=8, max_tokens=2048]         |
-| Qwen3-Omni | enable_audio=True  | 46.00%   | 23/50   | 15     | 0           | PR #316 [H200, 50-sample subset, c=1, max_tokens=2048] |
+| Qwen3-Omni | enable_audio=False | 66.33%   | 597/900 | 0      | 22          | PR #393 [H200, V1-pipeline, full-set, c=8, max_tokens=2048]         |
+| Qwen3-Omni | enable_audio=True  | 60.00%   | 30/50   | 0      | 2           | PR #393 [H200, V1-pipeline, 50-sample subset, c=1, max_tokens=2048] |
+| Qwen3-Omni | enable_audio=False | 66.11%   | 595/900 | 0      | 28          | PR #351 [H100, full-set, c=8, max_tokens=2048, text-only server] |
+| Qwen3-Omni | enable_audio=True  | 18.00%   | 9/50    | 21     | 20          | PR #351 [H100, 50-sample subset, c=1, max_tokens=64, timeout=120s] |
 
 Note (Xuesong): full 900 not runfor enable_audio = True — Issue #276 talker is c=1 only and ~2 min/sample (~30 h for full set). 15/50 requests failed
  in audio generation (Issue #276); on the 35 completed requests accuracy = 65.7%.
@@ -45,8 +47,24 @@ Speed (speed)
 
 | Model      | Config             | latency_mean_s | latency_p95_s | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                                                     |
 | ---------- | ------------------ | -------------- | ------------- | -------------- | -------------- | ------------- | ---------------------------------------------------------- |
-| Qwen3-Omni | enable_audio=False | 25.70          | 96.38         | 0.308          | 19.6           | 19.9          | PR #316 [H200, full-set, c=8, max_tokens=2048]             |
-| Qwen3-Omni | enable_audio=True  | 123.13         | 221.52        | 0.004          | 2.2            | 2.1           | PR #316 [H200, **50-sample subset**, c=1, max_tokens=2048] |
+| Qwen3-Omni | enable_audio=False | 5.724          | 20.134        | 1.377          | 83.5           | 88.4          | PR #393 [H200, V1-pipeline, full-set, c=8, max_tokens=2048]             |
+| Qwen3-Omni | enable_audio=True  | 70.927         | 197.541       | 0.014          | 10.2           | 8.2           | PR #393 [H200, V1-pipeline, **50-sample subset**, c=1, max_tokens=2048] |
+| Qwen3-Omni | enable_audio=False | 20.297         | 74.122        | 0.392          | 24.9           | 25.4          | PR #351 [H100, full-set, c=8, max_tokens=2048, text-only server] |
+| Qwen3-Omni | enable_audio=True  | 19.579         | 23.147        | 0.009          | 3.3            | 3.3           | PR #351 [H100, 50-sample subset, c=1, max_tokens=64, timeout=120s] |
+
+Local v1 Pipeline Result (this workspace, 2026-05-01)
+
+Accuracy (summary)
+
+| Model      | Config             | accuracy | correct | failed | mc_fallback | Source                                                       |
+| ---------- | ------------------ | -------- | ------- | ------ | ----------- | ------------------------------------------------------------ |
+| Qwen3-Omni | enable_audio=False | 67.11%   | 604/900 | 0      | 26          | local v1 sweep [H200, full-set, c=8, max_tokens=2048]       |
+
+Speed (speed)
+
+| Model      | Config             | latency_mean_s | latency_p95_s | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                                                       |
+| ---------- | ------------------ | -------------- | ------------- | -------------- | -------------- | ------------- | ------------------------------------------------------------ |
+| Qwen3-Omni | enable_audio=False | 6.542          | 21.356        | 1.202          | 76.3           | 76.5          | local v1 sweep [H200, full-set, c=8, max_tokens=2048]       |
 """
 
 
@@ -64,16 +82,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from benchmarks.benchmarker.runner import BenchmarkRunner, RunConfig
 from benchmarks.benchmarker.utils import save_json_results, wait_for_service
 from benchmarks.dataset.mmmu import load_mmmu_samples
-from benchmarks.metrics.performance import compute_speed_metrics
-from benchmarks.tasks.tts import (
-    compute_text_audio_consistency,
-    print_speed_summary,
-    print_wer_summary,
-)
+from benchmarks.metrics.mmmu import compute_mmmu_metrics, print_mmmu_accuracy_summary
+from benchmarks.metrics.performance import compute_speed_metrics, print_speed_summary
+from benchmarks.metrics.wer import print_wer_summary
+from benchmarks.tasks.tts import compute_text_audio_consistency
 from benchmarks.tasks.visual_understand import (
-    compute_mmmu_metrics,
+    build_mmmu_result_records,
     make_mmmu_send_fn,
-    print_mmmu_accuracy_summary,
 )
 
 logging.basicConfig(
@@ -101,6 +116,8 @@ class MMMUEvalConfig:
     asr_device: str = "cuda:0"
     lang: str = "en"
     repo_id: str | None = None
+    prompt_override: str | None = None
+    timeout_s: int = 300
 
 
 def _build_base_url(config: MMMUEvalConfig) -> str:
@@ -116,7 +133,11 @@ async def run_mmmu_eval(config: MMMUEvalConfig) -> dict:
     base_url = _build_base_url(config)
     api_url = f"{base_url}/v1/chat/completions"
 
-    samples = load_mmmu_samples(config.max_samples, repo_id=config.repo_id)
+    samples = load_mmmu_samples(
+        config.max_samples,
+        repo_id=config.repo_id,
+        instruction_override=config.prompt_override,
+    )
     logger.info(f"Prepared {len(samples)} MMMU samples")
 
     audio_dir: str | None = None
@@ -139,11 +160,13 @@ async def run_mmmu_eval(config: MMMUEvalConfig) -> dict:
             request_rate=config.request_rate,
             warmup=config.warmup,
             disable_tqdm=config.disable_tqdm,
+            timeout_s=config.timeout_s,
         )
     )
     request_results = await runner.run(samples, send_fn)
 
-    summary, per_sample = compute_mmmu_metrics(samples, request_results)
+    per_sample = build_mmmu_result_records(samples, request_results)
+    summary = compute_mmmu_metrics(per_sample)
     speed_metrics = compute_speed_metrics(
         request_results, wall_clock_s=runner.wall_clock_s
     )
@@ -203,7 +226,10 @@ async def benchmark(args: argparse.Namespace) -> dict:
     results = await run_mmmu_eval(config)
     print_mmmu_accuracy_summary(results["summary"], config.model)
     print_speed_summary(
-        results["speed"], config.model, config.max_concurrency, title="MMMU Speed"
+        results["speed"],
+        config.model,
+        config.max_concurrency,
+        title="MMMU Speed",
     )
     if "wer" in results:
         print_wer_summary(results["wer"]["summary"], config.model)

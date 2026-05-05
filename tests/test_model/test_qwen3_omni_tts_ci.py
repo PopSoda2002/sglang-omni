@@ -4,8 +4,6 @@
 Usage:
     pytest tests/test_model/test_qwen3_omni_tts_ci.py -s -x
 
-TODO (Jingwen, Chenyang): Support streaming for audio output
-and concurrency of vocoder.
 """
 
 from __future__ import annotations
@@ -24,14 +22,17 @@ from benchmarks.eval.benchmark_omni_seedtts import (
     OmniSeedttsBenchmarkConfig,
     run_omni_seedtts_benchmark,
 )
+from benchmarks.metrics.performance import print_speed_summary
+from benchmarks.metrics.wer import print_wer_summary
 from sglang_omni.utils import find_available_port
 from tests.utils import (
     apply_slack,
     assert_per_request_fields,
     assert_speed_thresholds,
     assert_summary_metrics,
-    assert_wer_results,
+    assert_wer_partitioned,
     no_proxy_env,
+    server_log_file,
     start_server_from_cmd,
     stop_server,
 )
@@ -40,27 +41,23 @@ MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# note (Chenyang): Currently we only run concurrency=1 and a small dataset
-# (seedtts-mini, 10 samples). Support higher concurrency and larger datasets
-# once the Qwen3-Omni pipeline is optimized for concurrent requests.
+CONCURRENCY = 8
+MAX_SAMPLES = 50
+DATASET_CACHE_ENV = "SGLANG_SEEDTTS50_DIR"
 
-CONCURRENCY = 1
-MAX_SAMPLES = 10
-# Also used in .github/workflows/test-qwen3-omni-ci.yaml — keep in sync.
-DATASET_CACHE_ENV = "SGLANG_SEEDTTS_MINI_DIR"
-
-STARTUP_TIMEOUT = 900
+STARTUP_TIMEOUT = 300
 WER_TIMEOUT = 600
 
-# note (Chenyang): P95 values measured on H20 CI machines with concurrency=1,
-# seedtts-mini dataset (5 samples). Update these when hardware or model changes.
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/382#issuecomment-4366925373
+VC_WER_BELOW_50_CORPUS_MAX = 0.03
+VC_N_ABOVE_50_MAX = 1
 
 _VC_NON_STREAM_P95 = {
-    1: {
-        "throughput_qps": 0.17,
-        "tok_per_s_agg": 2.3,
-        "latency_mean_s": 6.0,
-        "rtf_mean": 2.0,
+    8: {
+        "throughput_qps": 1.284,
+        "tok_per_s_agg": 2.6,
+        "latency_mean_s": 5.636,
+        "rtf_mean": 1.6738,
     },
 }
 
@@ -69,15 +66,7 @@ _VC_NON_STREAM_P95 = {
 # Higher-is-better metrics (throughput): threshold = P95 x slack_higher
 # Lower-is-better metrics (latency, rtf): threshold = P95 x slack_lower
 
-THRESHOLD_SLACK_HIGHER = 0.75
-THRESHOLD_SLACK_LOWER = 1.25
-
-VC_NON_STREAM_THRESHOLDS = apply_slack(
-    _VC_NON_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
-)
-
-VC_WER_MAX_CORPUS = 0.06
-VC_WER_MAX_PER_SAMPLE = 0.30
+VC_NON_STREAM_THRESHOLDS = apply_slack(_VC_NON_STREAM_P95)
 
 
 def _run_benchmark(
@@ -91,6 +80,7 @@ def _run_benchmark(
         meta=meta,
         output_dir=output_dir,
         max_samples=MAX_SAMPLES,
+        max_concurrency=CONCURRENCY,
         voice_clone=True,
     )
     speed_results = asyncio.run(run_omni_seedtts_benchmark(config))
@@ -111,9 +101,9 @@ def _run_wer_transcribe(
 ) -> dict:
     """Transcribe saved audio and compute WER in CI.
 
-    note (Chenyang): We invoke the benchmark as ``python -m
-    benchmarks.eval.benchmark_omni_seedtts`` rather than via a direct file
-    path so the ``benchmarks`` package is discovered via PEP 420 namespace
+    note (Chenyang): We invoke the benchmark as python -m
+    benchmarks.eval.benchmark_omni_seedtts rather than via a direct file
+    path so the benchmarks package is discovered via PEP 420 namespace
     lookup from the project root (which PYTHONPATH guarantees below).
     """
     cmd = [
@@ -184,7 +174,7 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
         root = Path(override_dir).expanduser()
     else:
         root = tmp_path_factory.mktemp("seed_tts_eval") / "data"
-    download_dataset(DATASETS["seedtts-mini"], str(root), quiet=True)
+    download_dataset(DATASETS["seedtts-50"], str(root), quiet=True)
     return root
 
 
@@ -192,7 +182,7 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def server_process(tmp_path_factory: pytest.TempPathFactory):
     """Start the Qwen3-Omni speech server and wait until healthy."""
     port = find_available_port()
-    log_file = tmp_path_factory.mktemp("server_logs") / "server.log"
+    log_file = server_log_file(tmp_path_factory)
     cmd = [
         sys.executable,
         "examples/run_qwen3_omni_speech_server.py",
@@ -223,12 +213,7 @@ def speed_output_dir(
     dataset_dir: Path,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> str:
-    """Run the speed benchmark once and expose the output directory.
-
-    Keeping the benchmark in its own fixture (rather than a test body that
-    writes a module-level global) lets the WER stage consume the audio
-    without coupling test ordering through mutable globals.
-    """
+    """Run the speed benchmark once and expose the output directory."""
     output_dir = str(tmp_path_factory.mktemp("vc_nonstream"))
     results = _run_benchmark(
         server_process.port,
@@ -236,6 +221,9 @@ def speed_output_dir(
         output_dir,
     )
     summary, per_request = results["summary"], results["per_request"]
+    print_speed_summary(
+        summary, "qwen3-omni", CONCURRENCY, title="TTS Voice-Clone Speed"
+    )
     assert_summary_metrics(summary)
     assert_per_request_fields(per_request)
     assert_speed_thresholds(summary, VC_NON_STREAM_THRESHOLDS, CONCURRENCY)
@@ -247,13 +235,7 @@ def wer_audio_dir(
     server_process: subprocess.Popen,
     speed_output_dir: str,
 ) -> str:
-    """Reuse speed-benchmark audio for WER after freeing the TTS server GPU.
-
-    ``stop_server`` is called here (in addition to the ``server_process``
-    teardown) so Whisper-large-v3 can claim the GPU memory before the
-    transcribe subprocess runs. ``stop_server`` is idempotent so the later
-    teardown call is a safe no-op.
-    """
+    """Reuse speed-benchmark audio for WER after freeing the TTS server GPU."""
     stop_server(server_process)
     generated_path = Path(speed_output_dir) / "generated.json"
     assert generated_path.exists(), f"WER metadata missing: {generated_path}"
@@ -275,7 +257,12 @@ def test_voice_cloning_wer(
         str(dataset_dir / "en" / "meta.lst"),
         wer_audio_dir,
     )
-    assert_wer_results(results, VC_WER_MAX_CORPUS, VC_WER_MAX_PER_SAMPLE)
+    print_wer_summary(results["summary"], "qwen3-omni")
+    assert_wer_partitioned(
+        results,
+        max_wer_below_50_corpus=VC_WER_BELOW_50_CORPUS_MAX,
+        max_n_above_50=VC_N_ABOVE_50_MAX,
+    )
 
 
 if __name__ == "__main__":

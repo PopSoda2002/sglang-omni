@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -13,6 +14,48 @@ from sglang_omni.models.qwen3_omni.io import PipelineState, ThinkerOutput
 
 if TYPE_CHECKING:
     from sglang_omni.engines.omni.runtime.sglang_ar import SGLangARRequestData
+
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_THINKER_MAX_NEW_TOKENS = 2048
+DEFAULT_THINKER_MAX_SEQ_LEN = 8192
+
+
+def validate_prompt_seq_len(
+    input_ids: torch.Tensor,
+    *,
+    max_seq_len: int | None,
+    max_new_tokens: int = DEFAULT_THINKER_MAX_NEW_TOKENS,
+    request_id: str | None = None,
+) -> None:
+    if max_seq_len is None:
+        return
+    prompt_len = int(input_ids.numel())
+    if prompt_len >= max_seq_len:
+        logger.info(
+            f"rejecting request {request_id}: prompt {prompt_len} tokens "
+            f">= max_seq_len {max_seq_len}"
+        )
+        raise ValueError(
+            f"The input ({prompt_len} tokens) is longer than the model's "
+            f"context length ({max_seq_len} tokens)."
+        )
+    total_tokens = prompt_len + int(max_new_tokens)
+    if total_tokens >= max_seq_len:
+        logger.info(
+            f"rejecting request {request_id}: prompt {prompt_len} + "
+            f"max_new_tokens {int(max_new_tokens)} = {total_tokens} tokens "
+            f">= max_seq_len {max_seq_len}"
+        )
+        raise ValueError(
+            f"Requested token count exceeds the model's maximum context length "
+            f"of {max_seq_len} tokens. You requested a total of {total_tokens} "
+            f"tokens: {prompt_len} tokens from the input messages and "
+            f"{int(max_new_tokens)} tokens for the completion. Please reduce "
+            f"the number of tokens in the input messages or the completion to "
+            f"fit within the limit."
+        )
 
 
 def build_encoder_request(
@@ -58,6 +101,8 @@ def build_thinker_request(
     state: PipelineState,
     *,
     params: dict[str, Any],
+    max_seq_len: int | None = None,
+    request_id: str | None = None,
 ) -> ARRequestData:
     prompt = state.prompt
     if not isinstance(prompt, dict):
@@ -66,6 +111,13 @@ def build_thinker_request(
     input_ids = prompt.get("input_ids")
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("prompt.input_ids must be a torch.Tensor")
+    max_new_tokens = params.get("max_new_tokens", DEFAULT_THINKER_MAX_NEW_TOKENS)
+    validate_prompt_seq_len(
+        input_ids,
+        max_seq_len=max_seq_len,
+        max_new_tokens=max_new_tokens,
+        request_id=request_id,
+    )
 
     attention_mask = prompt.get("attention_mask")
     thinker_inputs = state.thinker_inputs or {}
@@ -89,7 +141,7 @@ def build_thinker_request(
         ),
         model_inputs=model_inputs,
         capture_model_output_keys=tuple(capture_keys) if capture_keys else (),
-        max_new_tokens=params.get("max_new_tokens"),
+        max_new_tokens=max_new_tokens,
         temperature=params.get("temperature", 0.0),
     )
 
@@ -160,6 +212,7 @@ def build_sglang_thinker_request(
     params: dict[str, Any],
     tokenizer: Any,
     vocab_size: int,
+    max_seq_len: int | None = None,
     request_id: str | None = None,
     thinker_config: Any = None,
 ) -> "SGLangARRequestData":
@@ -180,6 +233,13 @@ def build_sglang_thinker_request(
     input_ids = prompt.get("input_ids")
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("prompt.input_ids must be a torch.Tensor")
+    max_new_tokens = params.get("max_new_tokens", DEFAULT_THINKER_MAX_NEW_TOKENS)
+    validate_prompt_seq_len(
+        input_ids,
+        max_seq_len=max_seq_len,
+        max_new_tokens=max_new_tokens,
+        request_id=request_id,
+    )
 
     input_ids = input_ids.to(dtype=torch.long)
 
@@ -232,10 +292,8 @@ def build_sglang_thinker_request(
     if "attention_mask" in model_inputs:
         model_inputs.pop("attention_mask", None)
 
-    max_new_tokens = params.get("max_new_tokens", 2048)
     temperature = params.get("temperature", 0.0)
 
-    # Build SGLang SamplingParams and normalize
     sampling_params = SamplingParams(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
@@ -446,10 +504,17 @@ def apply_thinker_result(
             if result.input_ids is not None and hasattr(result.input_ids, "shape")
             else 0
         )
+        finish_reason = None
+        req_finish_reason = getattr(
+            getattr(result, "req", None), "finished_reason", None
+        )
+        if hasattr(req_finish_reason, "to_json"):
+            finish_reason = req_finish_reason.to_json().get("type")
         thinker_out: ThinkerOutput = {
             "output_ids": output_ids,
             "step": len(output_ids),
             "is_final": True,
+            "finish_reason": finish_reason,
             "extra_model_outputs": dict(result.extra_model_outputs),
             "prompt_tokens": prompt_tokens,
             "completion_tokens": len(output_ids),
@@ -459,6 +524,7 @@ def apply_thinker_result(
             "output_ids": [],
             "step": 0,
             "is_final": True,
+            "finish_reason": None,
             "extra_model_outputs": {"result": result},
         }
 

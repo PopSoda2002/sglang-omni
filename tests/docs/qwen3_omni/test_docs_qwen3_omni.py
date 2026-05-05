@@ -26,7 +26,13 @@ from jiwer import process_words
 
 from benchmarks.tasks.tts import load_asr_model, normalize_text, transcribe
 from sglang_omni.utils import find_available_port
-from tests.utils import disable_proxy, no_proxy_env, start_server_from_cmd, stop_server
+from tests.utils import (
+    disable_proxy,
+    no_proxy_env,
+    server_log_file,
+    start_server_from_cmd,
+    stop_server,
+)
 
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MODEL_NAME = "qwen3-omni"
@@ -110,11 +116,11 @@ class TestTextOnlyMode:
     @pytest.fixture(scope="class")
     def server(self, tmp_path_factory: pytest.TempPathFactory):
         port = find_available_port()
-        log_file = tmp_path_factory.mktemp("text_only_logs") / "server.log"
+        log_file = server_log_file(tmp_path_factory, "text_only_logs")
         cmd = [
             sys.executable,
             "-m",
-            "sglang_omni.cli.cli",
+            "sglang_omni.cli",
             "serve",
             "--model-path",
             MODEL_PATH,
@@ -171,6 +177,30 @@ class TestTextOnlyMode:
         assert isinstance(content, str)
         assert len(content) > 0
 
+    @pytest.mark.docs
+    @pytest.mark.parametrize("client", ["python", "curl"])
+    def test_video_audio(self, server: int, client: str) -> None:
+        """Docs section: Text-Only Mode — Video and Audio Input."""
+        assert VIDEO_PATH.exists(), f"Test video not found: {VIDEO_PATH}"
+        assert VIDEO_AUDIO_PATH.exists(), f"Test audio not found: {VIDEO_AUDIO_PATH}"
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": ""}],
+            "videos": [str(VIDEO_PATH)],
+            "audios": [str(VIDEO_AUDIO_PATH)],
+            "modalities": ["text"],
+            "max_tokens": 16,
+        }
+        result = _send_chat(server, payload, client)
+        assert "choices" in result
+        content = result["choices"][0]["message"]["content"]
+        assert isinstance(content, str)
+        assert len(content) > 0
+        content_lower = content.lower()
+        assert any(
+            kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS
+        ), f"Text output missing expected keywords about the video. Got: {content}"
+
 
 class TestSpeechMode:
     """Speech server (multi-GPU, text + audio output)."""
@@ -178,7 +208,7 @@ class TestSpeechMode:
     @pytest.fixture(scope="class")
     def server(self, tmp_path_factory: pytest.TempPathFactory):
         port = find_available_port()
-        log_file = tmp_path_factory.mktemp("speech_logs") / "server.log"
+        log_file = server_log_file(tmp_path_factory, "speech_logs")
         cmd = [
             sys.executable,
             "examples/run_qwen3_omni_speech_server.py",

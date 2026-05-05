@@ -7,15 +7,15 @@ Evaluates Qwen3-Omni accuracy and performance on the MMSU eval set via
 Usage:
 
     # Launch the server:
-    python -m sglang_omni.cli.cli serve \
+    python -m sglang_omni.cli serve \
         --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
-        --port 8000
+        --version v1 --port 8000
 
     # If only text is needed:
 
-    python -m sglang_omni.cli.cli serve \
+    python -m sglang_omni.cli serve \
         --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
-        --text-only --port 8000
+        --version v1 --text-only --port 8000
 
     # Prepare the dataset:
     python -m benchmarks.dataset.prepare --dataset mmsu
@@ -42,14 +42,16 @@ CI runs on a subset and has its own thresholds elsewhere (see tasks/*.py).
 
 Benchmark: MMSU     |  Dataset: MMSU full (5000 samples)
 Hardware:  1 x H200 (default; non-H200 sources are tagged in Source column)
-Last verified: 2026-04-18
+Last verified: 2026-05-04
 
 Accuracy (accuracy)
 
 | Model      | Config                | overall_accuracy | parseable_samples | unparseable_samples | Source                        |
 | ---------- | --------------------- | ---------------- | ----------------- | ------------------- | ----------------------------- |
-| Qwen3-Omni | modalities=text       | 70.88%           | 5000/5000         | 0                   | PR #316 [H200, full-set, c=8] |
-| Qwen3-Omni | modalities=text+audio | 71.22%           | 5000/5000         | 0                   | PR #316 [H200, full-set, c=8] |
+| Qwen3-Omni | modalities=text       | 70.96%           | 5000/5000         | 0                   | PR #393 [H200, V1-pipeline, full-set, c=8] |
+| Qwen3-Omni | modalities=text+audio | 71.06%           | 5000/5000         | 0                   | PR #393 [H200, V1-pipeline, full-set, c=8] |
+| Qwen3-Omni | modalities=text       | 71.10%           | 4999/5000         | 1                   | PR #351 [H100, full-set, c=8] |
+| Qwen3-Omni | modalities=text+audio | 71.14%           | 5000/5000         | 0                   | PR #351 [H100, full-set, c=8] |
 
 Per-task accuracy (accuracy.per_task; top-level task names only — full sub/sub-sub trees stay in JSON output)
 
@@ -57,19 +59,44 @@ Per-task accuracy (accuracy.per_task; top-level task names only — full sub/sub
 | ---------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
 | Qwen3-Omni | modalities=text       | strong: casual_reasoning / continuation_writing / long_speech_summarization / polysemy_reasoning = 100%; weak: dialogue_turn_counting 10.10%, pitch_comparison 22.22%, speed_comparison 22.94% | PR #316 [H200, full-set] |
 | Qwen3-Omni | modalities=text+audio | strong: casual_reasoning / continuation_writing / long_speech_summarization / polysemy_reasoning = 100%; weak: dialogue_turn_counting 12.12%, speed_comparison 21.10%, pitch_comparison 24.07% | PR #316 [H200, full-set] |
+| Qwen3-Omni | modalities=text       | strong: casual_reasoning / continuation_writing / long_speech_summarization / polysemy_reasoning = 100%; weak: dialogue_turn_counting 12.12%, speed_comparison 22.94%, pitch_comparison 23.15%   | PR #351 [H100, full-set] |
+| Qwen3-Omni | modalities=text+audio | strong: casual_reasoning / continuation_writing / long_speech_summarization / polysemy_reasoning = 100%; weak: dialogue_turn_counting 13.13%, speed_comparison 22.02%, pitch_comparison 24.07%   | PR #351 [H100, full-set] |
 
 Speed (speed)
 
 | Model      | Config                | latency_mean_s | latency_p95_s | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                                          |
 | ---------- | --------------------- | -------------- | ------------- | -------------- | -------------- | ------------- | ----------------------------------------------- |
-| Qwen3-Omni | modalities=text       | 0.349          | 0.484         | 22.91          | 6.1            | 5.9           | PR #316 [H200, full-set, c=8]                   |
-| Qwen3-Omni | modalities=text+audio | 0.330          | 0.444         | 24.23          | 6.4            | 6.3           | PR #316 [H200, full-set, c=8, text-only server] |
+| Qwen3-Omni | modalities=text       | 0.226          | 0.335         | 35.33          | 9.1            | 9.1           | PR #393 [H200, V1-pipeline, full-set, c=8]                   |
+| Qwen3-Omni | modalities=text+audio | 0.243          | 0.340         | 32.89          | 8.5            | 8.5           | PR #393 [H200, V1-pipeline, full-set, c=8, text-only server] |
+| Qwen3-Omni | modalities=text       | 0.512          | 0.864         | 15.598         | 4.5            | 4.0           | PR #351 [H100, full-set, c=8]                   |
+| Qwen3-Omni | modalities=text+audio | 0.515          | 0.884         | 15.521         | 4.4            | 4.0           | PR #351 [H100, full-set, c=8] (text-only server) |
 
 Note (Xuesong): text + audio numbers above were measured against a text-only
 Qwen3-Omni server (talker disabled) because a full-pipeline run is blocked on
 Issue #276 (talker is c=1 only at ~2 min/sample). Numbers therefore reflect
 text-only behavior and are near-identical to the `modalities=text` row;
 re-run with talker enabled once #276 lands to get true full-pipeline reference.
+
+Local v1 Pipeline Result (this workspace, 2026-05-01)
+
+This local run used the stage-6 talker prompt on the full 2000-sample
+`zhaochenyang20/mmsu-ci-2000` backing set, not the 5000-sample `ddwang2000/MMSU`
+full set summarized above, so it is not directly apples-to-apples with the
+reference rows.
+
+Accuracy (summary)
+
+| Model      | Config                         | overall_accuracy | parseable_samples | unparseable_samples | Source                                                                       |
+| ---------- | ------------------------------ | ---------------- | ----------------- | ------------------- | ---------------------------------------------------------------------------- |
+| Qwen3-Omni | stage6 talker, mmsu-ci-2000    | 70.05%           | 1996/2000         | 4                   | local v1 run [H200, 2000-sample stage-6 backing set, speech pipeline, c=1] |
+
+Speed (speed)
+
+| Model      | Config                         | latency_mean_s | latency_p95_s | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                                                                       |
+| ---------- | ------------------------------ | -------------- | ------------- | -------------- | -------------- | ------------- | ---------------------------------------------------------------------------- |
+| Qwen3-Omni | stage6 talker, mmsu-ci-2000    | 22.049         | 31.935        | 0.362          | 2.7            | 2.7           | local v1 run [H200, 2000-sample stage-6 backing set, speech pipeline, c=1] |
+
+Additional local notes: `audio_returned=2000/2000`, `rtf_mean=1.2704`.
 """
 
 
@@ -87,15 +114,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from benchmarks.benchmarker.runner import BenchmarkRunner, RunConfig
 from benchmarks.benchmarker.utils import wait_for_service
 from benchmarks.dataset.mmsu import MmsuSample, load_mmsu_samples
+from benchmarks.metrics.mmsu import compute_mmsu_metrics, print_mmsu_summary
 from benchmarks.metrics.performance import compute_speed_metrics
+from benchmarks.metrics.wer import print_wer_summary
 from benchmarks.tasks.audio_understanding import (
     build_mmsu_results,
-    compute_mmsu_metrics,
     make_mmsu_send_fn,
-    print_mmsu_summary,
     save_mmsu_results,
 )
-from benchmarks.tasks.tts import compute_text_audio_consistency, print_wer_summary
+from benchmarks.tasks.tts import compute_text_audio_consistency
 
 logging.basicConfig(
     level=logging.INFO,
@@ -141,6 +168,7 @@ async def run(
             request_rate=args.request_rate,
             warmup=args.warmup,
             disable_tqdm=args.disable_tqdm,
+            timeout_s=args.timeout_s,
         )
     )
     request_results = await runner.run(samples, send_fn)
@@ -155,8 +183,6 @@ async def run(
         )
         speed["audio_expected"] = len(request_results)
 
-    print_mmsu_summary(metrics, args.model, speed_metrics=speed)
-
     output: dict = {"accuracy": metrics, "speed": speed}
     wer_results = None
     if audio_mode:
@@ -166,7 +192,6 @@ async def run(
             args.asr_device,
         )
         output["wer"] = wer_results
-        print_wer_summary(wer_results["summary"], args.model)
 
     if args.output_dir:
         save_mmsu_results(
@@ -206,6 +231,7 @@ def main() -> None:
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--max-concurrency", type=int, default=32)
     p.add_argument("--request-rate", type=float, default=float("inf"))
+    p.add_argument("--timeout-s", type=int, default=300)
     p.add_argument("--save-audio", action="store_true")
     p.add_argument("--disable-tqdm", action="store_true")
     p.add_argument("--seed", type=int, default=None)
@@ -225,7 +251,10 @@ def main() -> None:
 
     args = p.parse_args()
     wait_for_service(args.base_url or f"http://{args.host}:{args.port}")
-    asyncio.run(run(args))
+    output = asyncio.run(run(args))
+    print_mmsu_summary(output["accuracy"], args.model, speed_metrics=output["speed"])
+    if "wer" in output:
+        print_wer_summary(output["wer"]["summary"], args.model)
 
 
 if __name__ == "__main__":

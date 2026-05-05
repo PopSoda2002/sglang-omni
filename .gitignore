@@ -28,6 +28,7 @@ htmlcov/
 
 # Logs
 *.log
+*.txt
 output.wav
 
 # OS
@@ -40,5 +41,6 @@ results/
 .benchmark-data/
 _bench_out/
 
-# AI
-.claude/
+.tune-runs/
+.claude/*
+!.claude/skills/

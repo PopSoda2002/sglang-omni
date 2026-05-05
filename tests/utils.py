@@ -12,9 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
-from benchmarks.benchmarker.utils import wait_for_service
-
 STARTUP_TIMEOUT = 600
+# Note (Chenyang): Add for V1.
+_SERVER_VERSION_ENV = "SGLANG_OMNI_SERVER_VERSION"
+_QWEN3_LAUNCHERS = {
+    "run_qwen3_omni_server.py",
+    "run_qwen3_omni_speech_server.py",
+}
+# Note (Chenyang): End for V1.
 
 
 @dataclass
@@ -55,6 +60,14 @@ def no_proxy_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k.lower() not in proxy_keys}
 
 
+def server_log_file(tmp_path_factory, prefix: str = "server_logs") -> Path | None:
+    """Capture server logs to a file on CI; stream to the terminal locally."""
+    is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
+    if not is_ci:
+        return None
+    return tmp_path_factory.mktemp(prefix) / "server.log"
+
+
 def stop_server(proc: subprocess.Popen) -> None:
     """Gracefully stop the server process group, tolerating already-dead processes."""
     try:
@@ -74,10 +87,12 @@ def stop_server(proc: subprocess.Popen) -> None:
 def wait_healthy(
     proc: subprocess.Popen,
     port: int,
-    log_file: Path,
+    log_file: Path | None,
     timeout: int = STARTUP_TIMEOUT,
 ) -> None:
     """Wait for a server to report healthy, stopping it and raising on failure."""
+    from benchmarks.benchmarker.utils import wait_for_service
+
     try:
         with disable_proxy():
             wait_for_service(
@@ -89,7 +104,9 @@ def wait_healthy(
             )
     except Exception as exc:
         stop_server(proc)
-        log_text = log_file.read_text() if log_file.exists() else ""
+        log_text = (
+            log_file.read_text() if log_file is not None and log_file.exists() else ""
+        )
         message = str(exc)
         if log_text and log_text not in message:
             message = f"{message}\n{log_text}"
@@ -100,20 +117,52 @@ def wait_healthy(
         raise
 
 
+# Note (Chenyang): Add for V1.
+def _has_version_flag(cmd: list[str]) -> bool:
+    return any(arg == "--version" or arg.startswith("--version=") for arg in cmd)
+
+
+def _inject_server_version(cmd: list[str]) -> list[str]:
+    version = os.environ.get(_SERVER_VERSION_ENV)
+    if version != "v1" or _has_version_flag(cmd):
+        return list(cmd)
+
+    if len(cmd) >= 4 and cmd[1:4] == ["-m", "sglang_omni.cli", "serve"]:
+        return [*cmd[:4], "--version", version, *cmd[4:]]
+
+    if len(cmd) >= 2 and Path(cmd[1]).name in _QWEN3_LAUNCHERS:
+        return [*cmd, "--version", version]
+
+    return list(cmd)
+
+
+# Note (Chenyang): End for V1.
+
+
 def start_server_from_cmd(
     cmd: list[str],
-    log_file: Path,
+    log_file: Path | None,
     port: int,
     timeout: int = STARTUP_TIMEOUT,
 ) -> subprocess.Popen:
     """Start a server from an arbitrary command and wait until healthy."""
-    with open(log_file, "w") as log_handle:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    # Note (Chenyang): Add for V1.
+    resolved_cmd = _inject_server_version(cmd)
+    # Note (Chenyang): End for V1.
+    if log_file is None:
+        # Note (Chenyang): Add for V1.
+        proc = subprocess.Popen(resolved_cmd, start_new_session=True)
+        # Note (Chenyang): End for V1.
+    else:
+        with open(log_file, "w") as log_handle:
+            proc = subprocess.Popen(
+                # Note (Chenyang): Add for V1.
+                resolved_cmd,
+                # Note (Chenyang): End for V1.
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
     wait_healthy(proc, port, log_file, timeout=timeout)
     return proc
 
@@ -156,8 +205,8 @@ def assert_per_request_fields(
 
 def apply_slack(
     p95: dict[int, dict[str, float]],
-    slack_higher: float = 0.75,
-    slack_lower: float = 1.25,
+    slack_higher: float = 0.875,
+    slack_lower: float = 1.125,
 ) -> dict[int, dict[str, float]]:
     """Derive CI thresholds from P95 references with uniform slack.
 
@@ -205,76 +254,149 @@ def assert_speed_thresholds(summary: dict, thresholds: dict, concurrency: int) -
         )
 
 
+DEFAULT_TOTAL_COMPLETION_TOKEN_RTOL = 0.12
+DEFAULT_MEDIAN_COMPLETION_TOKEN_RTOL = 0.20
+DEFAULT_TOTAL_AUDIO_DURATION_RTOL = 0.12
+
+
+def _request_by_id(requests: list[dict]) -> dict:
+    return {request["id"]: request for request in requests}
+
+
+def _assert_request_sets(
+    non_stream_by_id: dict,
+    stream_by_id: dict,
+    expected_stream_count: int | None,
+) -> list:
+    common_ids = sorted(set(non_stream_by_id) & set(stream_by_id))
+    assert common_ids, "No overlapping request IDs between non-stream and stream runs"
+    assert set(stream_by_id).issubset(set(non_stream_by_id)), (
+        "Streaming requests must be a subset of non-streaming requests: "
+        f"non_stream={sorted(non_stream_by_id)}, stream={sorted(stream_by_id)}"
+    )
+    if expected_stream_count is not None:
+        assert len(stream_by_id) == expected_stream_count, (
+            f"Expected {expected_stream_count} streaming requests, "
+            f"got {len(stream_by_id)}"
+        )
+    return common_ids
+
+
+def _assert_relative_difference(
+    metric_name: str,
+    non_stream_value: float,
+    stream_value: float,
+    relative_tolerance: float,
+) -> None:
+    max_value = max(non_stream_value, stream_value)
+    assert abs(non_stream_value - stream_value) <= (relative_tolerance * max_value), (
+        f"{metric_name} differ too much - "
+        f"non_stream={non_stream_value}, stream={stream_value} "
+        f"(rtol={relative_tolerance})"
+    )
+
+
 def assert_streaming_consistency(
     non_stream_requests: list[dict],
     stream_requests: list[dict],
     *,
     expected_stream_count: int | None = None,
-    total_completion_token_rtol: float = 0.12,
-    median_completion_token_rtol: float = 0.20,
-    total_audio_duration_rtol: float = 0.12,
+    total_completion_token_rtol: float = DEFAULT_TOTAL_COMPLETION_TOKEN_RTOL,
+    median_completion_token_rtol: float = DEFAULT_MEDIAN_COMPLETION_TOKEN_RTOL,
+    total_audio_duration_rtol: float = DEFAULT_TOTAL_AUDIO_DURATION_RTOL,
 ) -> None:
-    """Assert stable invariants on the shared request subset."""
-    ns_by_id = {r["id"]: r for r in non_stream_requests}
-    st_by_id = {r["id"]: r for r in stream_requests}
-    common_ids = sorted(set(ns_by_id) & set(st_by_id))
-    assert common_ids, "No overlapping request IDs between non-stream and stream runs"
-    assert set(st_by_id).issubset(set(ns_by_id)), (
-        "Streaming requests must be a subset of non-streaming requests: "
-        f"non_stream={sorted(ns_by_id)}, stream={sorted(st_by_id)}"
+    """Assert stable invariants on the shared request subset between
+    non-streaming and streaming runs (matching prompt tokens, total/median
+    completion tokens within tolerance, total audio duration within tolerance).
+    """
+    non_stream_by_id = _request_by_id(non_stream_requests)
+    stream_by_id = _request_by_id(stream_requests)
+    common_ids = _assert_request_sets(
+        non_stream_by_id, stream_by_id, expected_stream_count
     )
-    if expected_stream_count is not None:
-        assert len(st_by_id) == expected_stream_count, (
-            f"Expected {expected_stream_count} streaming requests, "
-            f"got {len(st_by_id)}"
+
+    non_stream_completion_tokens: list[int] = []
+    stream_completion_tokens: list[int] = []
+    non_stream_audio_duration_total = 0.0
+    stream_audio_duration_total = 0.0
+
+    for request_id in common_ids:
+        non_stream_request = non_stream_by_id[request_id]
+        stream_request = stream_by_id[request_id]
+        assert non_stream_request["prompt_tokens"] == stream_request["prompt_tokens"], (
+            f"Request {request_id}: prompt_tokens mismatch - "
+            f"non_stream={non_stream_request['prompt_tokens']}, "
+            f"stream={stream_request['prompt_tokens']}"
         )
+        non_stream_completion_tokens.append(non_stream_request["completion_tokens"])
+        stream_completion_tokens.append(stream_request["completion_tokens"])
+        non_stream_audio_duration_total += non_stream_request["audio_duration_s"]
+        stream_audio_duration_total += stream_request["audio_duration_s"]
 
-    ns_completion_tokens: list[int] = []
-    st_completion_tokens: list[int] = []
-    ns_audio_duration_total = 0.0
-    st_audio_duration_total = 0.0
-
-    for rid in common_ids:
-        ns, st = ns_by_id[rid], st_by_id[rid]
-        assert ns["prompt_tokens"] == st["prompt_tokens"], (
-            f"Request {rid}: prompt_tokens mismatch — "
-            f"non_stream={ns['prompt_tokens']}, stream={st['prompt_tokens']}"
-        )
-        ns_completion_tokens.append(ns["completion_tokens"])
-        st_completion_tokens.append(st["completion_tokens"])
-        ns_audio_duration_total += ns["audio_duration_s"]
-        st_audio_duration_total += st["audio_duration_s"]
-
-    ns_completion_total = sum(ns_completion_tokens)
-    st_completion_total = sum(st_completion_tokens)
-    max_completion_total = max(ns_completion_total, st_completion_total)
-    assert abs(ns_completion_total - st_completion_total) <= (
-        total_completion_token_rtol * max_completion_total
-    ), (
-        "Total completion_tokens differ too much — "
-        f"non_stream={ns_completion_total}, stream={st_completion_total} "
-        f"(rtol={total_completion_token_rtol})"
+    _assert_relative_difference(
+        "Total completion_tokens",
+        sum(non_stream_completion_tokens),
+        sum(stream_completion_tokens),
+        total_completion_token_rtol,
+    )
+    _assert_relative_difference(
+        "Median completion_tokens",
+        statistics.median(non_stream_completion_tokens),
+        statistics.median(stream_completion_tokens),
+        median_completion_token_rtol,
+    )
+    _assert_relative_difference(
+        "Total audio_duration_s",
+        non_stream_audio_duration_total,
+        stream_audio_duration_total,
+        total_audio_duration_rtol,
     )
 
-    ns_completion_median = statistics.median(ns_completion_tokens)
-    st_completion_median = statistics.median(st_completion_tokens)
-    max_completion_median = max(ns_completion_median, st_completion_median)
-    assert abs(ns_completion_median - st_completion_median) <= (
-        median_completion_token_rtol * max_completion_median
-    ), (
-        "Median completion_tokens differ too much — "
-        f"non_stream={ns_completion_median}, stream={st_completion_median} "
-        f"(rtol={median_completion_token_rtol})"
+
+def assert_wer_partitioned(
+    results: dict,
+    *,
+    max_wer_below_50_corpus: float,
+    max_n_above_50: int,
+) -> None:
+    """Verify WER results using a partitioned view of the per-sample WER
+    distribution, suited to large-scale audio-QA TTS consistency tests:
+
+    - ``max_wer_below_50_corpus``: upper bound on corpus-level WER computed
+      ONLY over samples whose per-sample WER ≤ 50%. Measures transcription
+      quality on the "sane" subset, insensitive to catastrophic outliers.
+    - ``max_n_above_50``: upper bound on the count of samples with
+      per-sample WER > 50% (catastrophic failures).
+
+    Together these thresholds bound both the typical-case quality and the
+    tail of wildly-wrong outputs, without the length-sensitivity of a
+    single corpus-wide WER.
+    """
+    summary = results["summary"]
+    per_sample = results["per_sample"]
+
+    failed_details = [
+        f"  sample {s['id']}: {s.get('error')}"
+        for s in per_sample
+        if not s.get("is_success", True)
+    ]
+    assert summary["evaluated"] == summary["total_samples"], (
+        f"Only {summary['evaluated']}/{summary['total_samples']} samples evaluated, "
+        f"{summary['skipped']} skipped.\n"
+        f"Per-sample errors:\n" + "\n".join(failed_details)
     )
 
-    max_audio_duration_total = max(ns_audio_duration_total, st_audio_duration_total)
-    assert abs(ns_audio_duration_total - st_audio_duration_total) <= (
-        total_audio_duration_rtol * max_audio_duration_total
-    ), (
-        "Total audio_duration_s differs too much — "
-        f"non_stream={ns_audio_duration_total}, stream={st_audio_duration_total} "
-        f"(rtol={total_audio_duration_rtol})"
+    wer_below_50 = summary.get("wer_below_50_corpus", 0.0)
+    assert wer_below_50 <= max_wer_below_50_corpus, (
+        f"Corpus WER over samples with WER<=50% is "
+        f"{wer_below_50:.4f} ({wer_below_50 * 100:.2f}%) > threshold "
+        f"{max_wer_below_50_corpus} ({max_wer_below_50_corpus * 100:.2f}%)"
     )
+
+    n_above_50 = summary.get("n_above_50_pct_wer", 0)
+    assert (
+        n_above_50 <= max_n_above_50
+    ), f"{n_above_50} samples have WER>50% > threshold {max_n_above_50}"
 
 
 def assert_wer_results(
@@ -302,15 +424,16 @@ def assert_wer_results(
         f"> threshold {max_corpus_wer} ({max_corpus_wer * 100:.0f}%)"
     )
 
-    assert summary["n_above_50_pct_wer"] == 0, (
-        f"{summary['n_above_50_pct_wer']} samples have >50% WER — "
-        f"expected 0 catastrophic failures"
-    )
-
     for sample in per_sample:
         assert sample[
             "is_success"
         ], f"Sample {sample['id']} failed: {sample.get('error')}"
+
+    assert summary["n_above_50_pct_wer"] == 0, (
+        f"{summary['n_above_50_pct_wer']} samples have >50% WER — "
+        f"expected 0 catastrophic failures"
+    )
+    for sample in per_sample:
         if sample["wer"] is not None:
             assert sample["wer"] <= max_per_sample_wer, (
                 f"Sample {sample['id']} WER {sample['wer']:.4f} "

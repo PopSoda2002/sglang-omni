@@ -20,10 +20,13 @@ import pytest
 
 from benchmarks.dataset.prepare import DATASETS
 from benchmarks.eval.benchmark_omni_mmmu import MMMUEvalConfig, run_mmmu_eval
+from benchmarks.metrics.mmmu import print_mmmu_accuracy_summary
+from benchmarks.metrics.performance import print_speed_summary
 from sglang_omni.utils import find_available_port
 from tests.utils import (
     apply_slack,
     assert_speed_thresholds,
+    server_log_file,
     start_server_from_cmd,
     stop_server,
 )
@@ -31,18 +34,18 @@ from tests.utils import (
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
 CONCURRENCY = 8
-STARTUP_TIMEOUT = 900
+STARTUP_TIMEOUT = 300
 
-MMMU_MIN_ACCURACY = 0.52
+# Relaxed in V1 refactor: v0=0.60 → v1=0.56.
+MMMU_MIN_ACCURACY = 0.56
 
-# Note (Yifei, Chenyang): Thresholds reference
-# https://github.com/sgl-project/sglang-omni/pull/265#issuecomment-4228251028
+# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/382#issuecomment-4366925373
 
 _MMMU_P95 = {
     8: {
-        "throughput_qps": 0.128,
-        "tok_per_s_agg": 13.1,
-        "latency_mean_s": 59.30,
+        "throughput_qps": 0.685,
+        "tok_per_s_agg": 52.3,
+        "latency_mean_s": 10.935,
     },
 }
 MMMU_THRESHOLDS = apply_slack(_MMMU_P95)
@@ -52,7 +55,7 @@ MMMU_THRESHOLDS = apply_slack(_MMMU_P95)
 def server_process(tmp_path_factory: pytest.TempPathFactory):
     """Start the text-only Qwen3-Omni server and wait until healthy."""
     port = find_available_port()
-    log_file = tmp_path_factory.mktemp("server_logs") / "server.log"
+    log_file = server_log_file(tmp_path_factory)
     cmd = [
         sys.executable,
         "examples/run_qwen3_omni_server.py",
@@ -81,17 +84,32 @@ def test_mmmu_accuracy_and_speed(
         max_concurrency=CONCURRENCY,
         output_dir=str(tmp_path / "mmmu"),
         repo_id=DATASETS["mmmu-ci-50"],
+        # Note (Yifei):
+        # Regression guard for issue #299: warmup pre-populates the image
+        # encoder cache so the first real batch mixes cached and uncached
+        # requests. warmup > 1 keeps the lone hit from landing alone.
+        warmup=2,
     )
     results = asyncio.run(run_mmmu_eval(config))
 
     summary = results["summary"]
+    speed = results["speed"]
+    print_mmmu_accuracy_summary(summary, config.model)
+    print_speed_summary(speed, config.model, CONCURRENCY, title="MMMU Speed")
+
+    failed = summary.get("failed", 0)
+    total = summary.get("total_samples", 0)
+    assert failed == 0, (
+        f"MMMU had {failed}/{total} failed requests (timeouts or empty responses); "
+        f"any failure fails the test"
+    )
+
     assert summary["accuracy"] >= MMMU_MIN_ACCURACY, (
         f"MMMU accuracy {summary['accuracy']:.4f} "
         f"({summary['accuracy'] * 100:.1f}%) < "
         f"threshold {MMMU_MIN_ACCURACY} ({MMMU_MIN_ACCURACY * 100:.0f}%)"
     )
 
-    speed = results["speed"]
     assert_speed_thresholds(speed, MMMU_THRESHOLDS, CONCURRENCY)
 
 

@@ -82,12 +82,20 @@ def _strip_image_tags(text: str) -> str:
     return re.sub(r"<image\s*\d+>", "", text).strip()
 
 
-def format_mmmu_prompt(question: str, options: list[str]) -> str:
+def format_mmmu_prompt(
+    question: str,
+    options: list[str],
+    instruction_override: str | None = None,
+) -> str:
     """Format an MMMU prompt (multiple-choice or open-ended).
 
     Image placeholders (<image 1>, etc.) are stripped because
     sglang-omni handles image injection separately via the ``images``
     request field.
+
+    When *instruction_override* is provided for a multiple-choice
+    sample, it replaces the default instruction block (callers are
+    responsible for including the 'Answer: $LETTER' format directive).
 
     For multiple-choice, returns::
 
@@ -108,19 +116,18 @@ def format_mmmu_prompt(question: str, options: list[str]) -> str:
         Answer the following question. The last line of your response
         should be of the following format: 'Answer: $ANSWER' ...
     """
+    from benchmarks.tasks.visual_understand import MULTI_CHOICE_INSTRUCTION
+
     clean_question = _strip_image_tags(question)
     prompt = f"{clean_question}\n"
     if options:
         for i, opt in enumerate(options):
             letter = chr(ord("A") + i)
             prompt += f"{letter}. {opt}\n"
-        prompt += (
-            "\nAnswer the following multiple-choice question. "
-            "The last line of your response should be of the "
-            "following format: 'Answer: $LETTER' (without quotes) "
-            "where LETTER is one of the options. "
-            "Think step by step before answering."
-        )
+        if instruction_override is not None:
+            prompt += f"\n{instruction_override}"
+        else:
+            prompt += MULTI_CHOICE_INSTRUCTION
     else:
         prompt += (
             "\nAnswer the following question. "
@@ -154,7 +161,11 @@ def _load_full_mmmu() -> list:
     return merged.select(order)
 
 
-def _dataset_to_samples(dataset, max_samples: int | None) -> list[MMMUSample]:
+def _dataset_to_samples(
+    dataset,
+    max_samples: int | None,
+    instruction_override: str | None = None,
+) -> list[MMMUSample]:
     """Convert HuggingFace dataset rows to MMMUSample objects."""
     samples: list[MMMUSample] = []
     for idx in range(len(dataset)):
@@ -198,7 +209,7 @@ def _dataset_to_samples(dataset, max_samples: int | None) -> list[MMMUSample]:
             index2ans = {chr(ord("A") + i): opt for i, opt in enumerate(options)}
             question_type = "multiple-choice"
 
-        prompt = format_mmmu_prompt(question, options)
+        prompt = format_mmmu_prompt(question, options, instruction_override)
 
         samples.append(
             MMMUSample(
@@ -222,6 +233,7 @@ def load_mmmu_samples(
     max_samples: int | None = None,
     *,
     repo_id: str | None = None,
+    instruction_override: str | None = None,
 ) -> list[MMMUSample]:
     """Load MMMU validation samples.
 
@@ -231,12 +243,14 @@ def load_mmmu_samples(
             None which loads the full MMMU/MMMU (all 30 subjects,
             ~900 samples).  Pass a repo id like
             "zhaochenyang20/mmmu-ci-50" to load a pre-built subset.
+        instruction_override: Optional replacement for the default
+            multiple-choice instruction block (see format_mmmu_prompt).
     """
     if repo_id is not None:
         ds = load_dataset(repo_id, split="validation")
     else:
         ds = _load_full_mmmu()
 
-    samples = _dataset_to_samples(ds, max_samples)
+    samples = _dataset_to_samples(ds, max_samples, instruction_override)
     logger.info(f"Loaded {len(samples)} MMMU samples")
     return samples
