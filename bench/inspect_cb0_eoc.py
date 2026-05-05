@@ -13,10 +13,8 @@ import asyncio
 import os
 import uuid
 
-import soundfile as sf
 import torch
 
-from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
 from sglang_omni.models.higgs_tts.pipeline.stages import (
     create_aggregate_executor,
     create_audio_encoder_executor,
@@ -50,7 +48,6 @@ def main():
 
     # Monkey-patch decode_codebooks_batch to log top-10 cb0 logits per step.
     from sglang_omni.models.higgs_tts import model as model_mod
-    from sglang_omni.models.higgs_tts.sampler import step as sampler_step
 
     orig = model_mod.HiggsTTSModel.decode_codebooks_batch
     call_count = {"n": 0}
@@ -65,7 +62,10 @@ def main():
             topv, topi = probs.topk(10)
             eoc_p = float(probs[EOC_ID])
             boc_p = float(probs[BOC_ID])
-            top = [(int(i), round(float(v), 4)) for v, i in zip(topv.tolist(), topi.tolist())]
+            top = [
+                (int(i), round(float(v), 4))
+                for v, i in zip(topv.tolist(), topi.tolist())
+            ]
             print(f"  step {n:3d}: top10={top} eoc_p={eoc_p:.4f} boc_p={boc_p:.4f}")
         call_count["n"] = n + 1
         return orig(self, hidden_states_BD, req_ids, gen_params)
@@ -76,16 +76,23 @@ def main():
     audio_encoder = create_audio_encoder_executor(TTS_CKPT, device="cuda:0")
     aggregate = create_aggregate_executor()
     engine = create_sglang_tts_engine_executor(
-        TTS_CKPT, device="cuda:0", max_new_tokens=args.max_tokens,
-        mem_fraction_static=0.35, max_running_requests=2,
+        TTS_CKPT,
+        device="cuda:0",
+        max_new_tokens=args.max_tokens,
+        mem_fraction_static=0.35,
+        max_running_requests=2,
     )
 
     payload = StagePayload(
         request_id=str(uuid.uuid4()),
         request=OmniRequest(
             inputs={"input": synth, "reference_audio": {"audio_path": prompt_wav}},
-            params={"max_new_tokens": args.max_tokens, "temperature": args.temperature,
-                    "top_k": args.top_k, "seed": args.seed},
+            params={
+                "max_new_tokens": args.max_tokens,
+                "temperature": args.temperature,
+                "top_k": args.top_k,
+                "seed": args.seed,
+            },
         ),
         data=None,
     )
@@ -108,6 +115,7 @@ def main():
 
     result = asyncio.run(run())
     from sglang_omni.models.higgs_tts.io import HiggsTtsState
+
     state = HiggsTtsState.from_dict(result.data)
     print(f"\ntotal delayed rows: {len(state.output_codes_delayed)}")
 

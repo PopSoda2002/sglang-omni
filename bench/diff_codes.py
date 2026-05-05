@@ -52,12 +52,17 @@ def call_boson(base, text, delayed, max_tokens, temperature, top_k, seed):
 
 class _SglangPipeline:
     def __init__(self):
-        self.preprocess = create_preprocessing_executor(TTS_CKPT, audio_codec_device="cuda:0")
+        self.preprocess = create_preprocessing_executor(
+            TTS_CKPT, audio_codec_device="cuda:0"
+        )
         self.audio_encoder = create_audio_encoder_executor(TTS_CKPT, device="cuda:0")
         self.aggregate = create_aggregate_executor()
         self.engine = create_sglang_tts_engine_executor(
-            TTS_CKPT, device="cuda:0", max_new_tokens=1024,
-            mem_fraction_static=0.35, max_running_requests=2,
+            TTS_CKPT,
+            device="cuda:0",
+            max_new_tokens=1024,
+            mem_fraction_static=0.35,
+            max_running_requests=2,
         )
         self.loop = asyncio.new_event_loop()
         self.loop.run_until_complete(self._start())
@@ -81,15 +86,24 @@ class _SglangPipeline:
             request_id=str(uuid.uuid4()),
             request=OmniRequest(
                 inputs={"input": text, "reference_audio": {"audio_path": prompt_wav}},
-                params={"max_new_tokens": max_tokens, "temperature": temperature,
-                        "top_k": top_k, "seed": seed},
+                params={
+                    "max_new_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "seed": seed,
+                },
             ),
             data=None,
         )
         p = self.loop.run_until_complete(self._run(payload))
         from sglang_omni.models.higgs_tts.io import HiggsTtsState
+
         state = HiggsTtsState.from_dict(p.data)
-        return torch.tensor(state.output_codes_delayed, dtype=torch.long) if state.output_codes_delayed else None
+        return (
+            torch.tensor(state.output_codes_delayed, dtype=torch.long)
+            if state.output_codes_delayed
+            else None
+        )
 
 
 def main():
@@ -116,9 +130,15 @@ def main():
     delayed = apply_delay_pattern(ref_codes)
     print(f"ref codes: {ref_codes.shape} → delayed {delayed.shape}")
 
-    boson = call_boson(args.boson_base, synth, delayed,
-                       max_tokens=args.max_tokens, temperature=args.temperature,
-                       top_k=args.top_k, seed=args.seed)
+    boson = call_boson(
+        args.boson_base,
+        synth,
+        delayed,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        seed=args.seed,
+    )
     print(f"\nboson: {boson.shape if boson is not None else None}")
     if boson is not None:
         print("boson first 12 rows:")
@@ -126,8 +146,9 @@ def main():
             print(f"  {i:3d}: {row}")
 
     pipe = _SglangPipeline()
-    sglang = pipe.run(prompt_wav, synth, args.temperature, args.top_k,
-                      args.max_tokens, args.seed)
+    sglang = pipe.run(
+        prompt_wav, synth, args.temperature, args.top_k, args.max_tokens, args.seed
+    )
     print(f"\nsglang: {sglang.shape if sglang is not None else None}")
     if sglang is not None:
         print("sglang first 12 rows:")

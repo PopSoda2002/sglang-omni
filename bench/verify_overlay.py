@@ -12,9 +12,6 @@ import asyncio
 import os
 import uuid
 
-import soundfile as sf
-import torch
-
 from sglang_omni.models.higgs_tts.pipeline.stages import (
     create_aggregate_executor,
     create_audio_encoder_executor,
@@ -36,6 +33,7 @@ def main():
 
     # Hook 1: what our runtime sets as input_embeds
     from sglang_omni.models.higgs_tts.runtime import higgs_sglang_ar
+
     _orig_inject = higgs_sglang_ar.HiggsSGLangModelRunner._inject_ref_audio_prefill
 
     def _logged_inject(self, model_worker_batch, scheduler_output):
@@ -43,9 +41,12 @@ def main():
         # After: log the embed we set
         embed = model_worker_batch.input_embeds
         if embed is not None:
-            print(f"[inject] set input_embeds: shape={tuple(embed.shape)}, "
-                  f"dtype={embed.dtype}, device={embed.device}, "
-                  f"norm_per_pos={embed.norm(dim=-1)[:5].tolist()}...", flush=True)
+            print(
+                f"[inject] set input_embeds: shape={tuple(embed.shape)}, "
+                f"dtype={embed.dtype}, device={embed.device}, "
+                f"norm_per_pos={embed.norm(dim=-1)[:5].tolist()}...",
+                flush=True,
+            )
         else:
             print(f"[inject] input_embeds is None", flush=True)
 
@@ -53,18 +54,29 @@ def main():
 
     # Hook 2: what Qwen2Model.forward receives as input_embeds
     from sglang.srt.models import qwen2 as _qwen2
+
     _orig_forward = _qwen2.Qwen2Model.forward
 
-    def _logged_forward(self, input_ids, positions, forward_batch, input_embeds=None, **kw):
+    def _logged_forward(
+        self, input_ids, positions, forward_batch, input_embeds=None, **kw
+    ):
         if input_embeds is not None:
             norms = input_embeds.norm(dim=-1)
-            print(f"[backbone.forward] input_embeds: shape={tuple(input_embeds.shape)}, "
-                  f"dtype={input_embeds.dtype}, norm_per_pos[:5]={norms[:5].tolist()}...", flush=True)
+            print(
+                f"[backbone.forward] input_embeds: shape={tuple(input_embeds.shape)}, "
+                f"dtype={input_embeds.dtype}, norm_per_pos[:5]={norms[:5].tolist()}...",
+                flush=True,
+            )
         else:
             # embed_tokens(input_ids) path
-            print(f"[backbone.forward] input_embeds=None, input_ids shape={tuple(input_ids.shape)}, "
-                  f"min={int(input_ids.min())}, max={int(input_ids.max())}", flush=True)
-        return _orig_forward(self, input_ids, positions, forward_batch, input_embeds, **kw)
+            print(
+                f"[backbone.forward] input_embeds=None, input_ids shape={tuple(input_ids.shape)}, "
+                f"min={int(input_ids.min())}, max={int(input_ids.max())}",
+                flush=True,
+            )
+        return _orig_forward(
+            self, input_ids, positions, forward_batch, input_embeds, **kw
+        )
 
     _qwen2.Qwen2Model.forward = _logged_forward
 
@@ -72,8 +84,11 @@ def main():
     audio_encoder = create_audio_encoder_executor(TTS_CKPT, device="cuda:0")
     aggregate = create_aggregate_executor()
     engine = create_sglang_tts_engine_executor(
-        TTS_CKPT, device="cuda:0", max_new_tokens=4,
-        mem_fraction_static=0.35, max_running_requests=2,
+        TTS_CKPT,
+        device="cuda:0",
+        max_new_tokens=4,
+        mem_fraction_static=0.35,
+        max_running_requests=2,
     )
 
     payload = StagePayload(

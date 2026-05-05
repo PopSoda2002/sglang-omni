@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 import soundfile as sf
 import torch
@@ -26,6 +25,7 @@ def load_fused_ours(dtype):
     from sglang_omni.models.higgs_tts.pipeline.stages import (
         _load_fused_embedding_from_tts_ckpt,
     )
+
     m = _load_fused_embedding_from_tts_ckpt(TTS_CKPT, device="cpu")
     return m.to(dtype=getattr(torch, dtype))
 
@@ -34,8 +34,8 @@ def load_fused_boson_style(dtype):
     """Re-implement boson-vllm's fused-embedding load: same nn.Module
     class (which we ported verbatim), same weight tensor pulled with
     ``default_weight_loader``-like direct copy."""
-    from sglang_omni.models.higgs_tts.modeling import HiggsFusedMultiTextEmbedding
     from sglang_omni.models.higgs_tts.hf_config import HiggsMultimodalQwen3Config
+    from sglang_omni.models.higgs_tts.modeling import HiggsFusedMultiTextEmbedding
 
     cfg = HiggsMultimodalQwen3Config.from_pretrained(TTS_CKPT)
     enc = cfg.audio_encoder_config
@@ -95,9 +95,11 @@ def main():
     # on the same input and show that matches.
     import asyncio
     import uuid
+
     from sglang_omni.models.higgs_tts.io import HiggsTtsState
     from sglang_omni.models.higgs_tts.pipeline.stages import (
-        create_audio_encoder_executor, create_preprocessing_executor,
+        create_audio_encoder_executor,
+        create_preprocessing_executor,
     )
     from sglang_omni.proto import StagePayload
     from sglang_omni.proto.request import OmniRequest
@@ -115,14 +117,16 @@ def main():
     )
 
     async def run():
-        await preprocess.start(); await audio_encoder.start()
+        await preprocess.start()
+        await audio_encoder.start()
         try:
             await preprocess.add_request(payload)
             p = await preprocess.get_result()
             await audio_encoder.add_request(p)
             return await audio_encoder.get_result()
         finally:
-            await audio_encoder.stop(); await preprocess.stop()
+            await audio_encoder.stop()
+            await preprocess.stop()
 
     p = asyncio.run(run())
     st = HiggsTtsState.from_dict(p.data)
@@ -137,14 +141,20 @@ def main():
         print(f"  number of different entries: {d} / {stage_codes.numel()}")
         diffs = (stage_codes != delayed).nonzero(as_tuple=False)[:5]
         for row in diffs.tolist():
-            print(f"    [{row[0]},{row[1]}] stage={int(stage_codes[row[0], row[1]])} direct={int(delayed[row[0], row[1]])}")
+            print(
+                f"    [{row[0]},{row[1]}] stage={int(stage_codes[row[0], row[1]])} direct={int(delayed[row[0], row[1]])}"
+            )
 
     stage_embed = torch.tensor(st.reference_audio_embed, dtype=torch.float32)
     print(f"stage.reference_audio_embed shape: {tuple(stage_embed.shape)}")
     # Compare to the direct fused forward above (cast to fp32 for fair compare)
     out_a_f32 = out_a.float()
-    print(f"stage vs direct-forward bitwise equal: {torch.equal(stage_embed, out_a_f32)}")
-    print(f"stage vs direct-forward max abs diff:  {(stage_embed - out_a_f32).abs().max().item()}")
+    print(
+        f"stage vs direct-forward bitwise equal: {torch.equal(stage_embed, out_a_f32)}"
+    )
+    print(
+        f"stage vs direct-forward max abs diff:  {(stage_embed - out_a_f32).abs().max().item()}"
+    )
 
 
 if __name__ == "__main__":

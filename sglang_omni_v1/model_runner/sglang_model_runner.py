@@ -69,6 +69,9 @@ class SGLModelRunner(ModelRunner):
         from sglang_omni_v1.models.fishaudio_s2_pro.sglang_model import (
             S2ProSGLangTextModel,
         )
+        from sglang_omni_v1.models.higgs_tts.bootstrap import (
+            register_higgs_tts_in_sglang,
+        )
         from sglang_omni_v1.models.qwen3_omni.components.sglang_thinker import (
             Qwen3OmniThinkerForCausalLM,
         )
@@ -79,3 +82,4 @@ class SGLModelRunner(ModelRunner):
         ModelRegistry.models["Qwen3OmniThinkerForCausalLM"] = (
             Qwen3OmniThinkerForCausalLM
         )
+        register_higgs_tts_in_sglang()

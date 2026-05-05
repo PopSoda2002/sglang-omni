@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Higgs TTS model runner — V1 phase-aware AR base runner subclass.
+
+Drops the V0 ``HiggsSGLangModelRunner.execute`` flow into the V1 base
+:class:`sglang_omni_v1.model_runner.base.ModelRunner` hook layout:
+
+- ``prepare_prefill``: paste the precomputed ``reference_audio_embed`` at
+  the ``-100`` placeholder positions and set ``forward_batch.input_embeds``;
+  also propagate ``req_ids`` so :class:`HiggsTTSModel.forward` can route
+  per-row slot lookups.
+- ``prepare_decode``: just propagate ``req_ids``. The model itself rebuilds
+  the per-step embed via ``last_codes`` inside its ``forward``.
+- ``post_prefill`` / ``post_decode``: read each request's newly emitted
+  multi-codebook row from ``model._slots[req_id].output_codes[-1]``,
+  append to ``data.output_codes``, and overwrite ``result.next_token_ids``
+  with codebook-0 so the V1 base skips its own (text-vocab) sampler.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import torch
+
+from sglang_omni_v1.model_runner.base import ModelRunner
+from sglang_omni_v1.models.higgs_tts.tokenizer import AUDIO_PLACEHOLDER_ID
+
+logger = logging.getLogger(__name__)
+
+
+class HiggsTTSModelRunner(ModelRunner):
+    """V1 ModelRunner for :class:`HiggsTTSModel`."""
+
+    # ------------------------------------------------------------------
+    # Prefill
+    # ------------------------------------------------------------------
+
+    def prepare_prefill(self, forward_batch, schedule_batch, requests):
+        del schedule_batch
+        forward_batch.req_ids = [req.request_id for req in requests]
+        input_embeds = self._build_prefill_input_embeds(forward_batch, requests)
+        if input_embeds is not None:
+            forward_batch.input_embeds = input_embeds
+        return None  # use standard tp_worker forward path
+
+    def post_prefill(self, result, forward_batch, schedule_batch, requests):
+        del forward_batch, schedule_batch
+        self._collect_step_outputs(result, requests)
+
+    # ------------------------------------------------------------------
+    # Decode
+    # ------------------------------------------------------------------
+
+    def prepare_decode(self, forward_batch, schedule_batch, requests):
+        del schedule_batch
+        forward_batch.req_ids = [req.request_id for req in requests]
+        return None
+
+    def post_decode(self, result, forward_batch, schedule_batch, requests):
+        del forward_batch, schedule_batch
+        self._collect_step_outputs(result, requests)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _build_prefill_input_embeds(
+        self,
+        forward_batch: Any,
+        requests: list,
+    ) -> torch.Tensor | None:
+        input_ids = forward_batch.input_ids
+        if not isinstance(input_ids, torch.Tensor):
+            raise TypeError("Higgs prefill expects tensor input_ids")
+
+        device = input_ids.device
+        embed_tokens = self.model.backbone.model.embed_tokens
+
+        # ``embed_tokens`` would OOB on -100; substitute 0 before embed,
+        # then overwrite at placeholder positions with the precomputed
+        # fused audio embedding.
+        placeholder_mask = input_ids == AUDIO_PLACEHOLDER_ID
+        safe_ids = torch.where(placeholder_mask, torch.zeros_like(input_ids), input_ids)
+        text_embeds = embed_tokens(safe_ids)
+
+        any_overlay = False
+        offset = 0
+        for sched_req in requests:
+            data = sched_req.data
+            req_len = int(data.req.extend_input_len)
+            end = offset + req_len
+
+            ref_embed = data.reference_audio_embed
+            if ref_embed is not None and ref_embed.numel() > 0:
+                full_mask = placeholder_mask[offset:end]
+                n_placeholders = int(full_mask.sum().item())
+                if n_placeholders > 0:
+                    embed = ref_embed.to(device=device)
+                    consumed = data.num_ref_codes_consumed
+                    if embed.shape[0] < consumed + n_placeholders:
+                        logger.warning(
+                            "reference_audio_embed too short for req %s "
+                            "(have %d rows, already consumed %d, need %d more); "
+                            "skipping overlay",
+                            sched_req.request_id,
+                            embed.shape[0],
+                            consumed,
+                            n_placeholders,
+                        )
+                    else:
+                        embed_slice = embed[consumed : consumed + n_placeholders]
+                        mask_idx = full_mask.nonzero(as_tuple=True)[0] + offset
+                        text_embeds[mask_idx] = embed_slice.to(text_embeds.dtype)
+                        data.num_ref_codes_consumed = consumed + n_placeholders
+                        any_overlay = True
+            offset = end
+
+        # Always pass the embeds back so HiggsTTSModel's forward sees a
+        # consistent ``input_embeds`` shape. Even zero-shot requests pass
+        # ``embed_tokens(input_ids)`` through the same path.
+        del any_overlay  # silence linter; tracked for diagnostic purposes
+        return text_embeds
+
+    def _collect_step_outputs(self, result: Any, requests: list) -> None:
+        """Read newly emitted multi-codebook rows from the model and
+        overwrite ``result.next_token_ids`` with codebook-0 so the V1 base
+        skips its text-vocab sampler.
+        """
+        batch_size = len(requests)
+        if batch_size == 0:
+            return
+
+        model = self.model
+        cb0_per_row: list[int] = []
+        for sched_req in requests:
+            data = sched_req.data
+            req = data.req
+            slot = model._slots.get(sched_req.request_id)
+            if req.is_chunked > 0 or slot is None or not slot.output_codes:
+                cb0_per_row.append(0)
+                continue
+            codes_N = slot.output_codes[-1]
+            data.output_codes.append(codes_N.detach().cpu().clone())
+            data.generation_done = bool(slot.sampler.generation_done)
+            cb0_per_row.append(int(codes_N[0].item()))
+
+        device = (
+            result.logits_output.next_token_logits.device
+            if (
+                result.logits_output is not None
+                and result.logits_output.next_token_logits is not None
+            )
+            else torch.device("cuda")
+        )
+        result.next_token_ids = torch.tensor(
+            cb0_per_row,
+            dtype=torch.long,
+            device=device,
+        )
+
+
+__all__ = ["HiggsTTSModelRunner"]

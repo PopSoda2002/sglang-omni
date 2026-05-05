@@ -90,8 +90,15 @@ def load_seed_tts(n: int):
     return out
 
 
-def call_boson(base: str, prompt_text: str, delayed_codes: torch.Tensor,
-               max_tokens: int, temperature: float, top_k: int, seed: int):
+def call_boson(
+    base: str,
+    prompt_text: str,
+    delayed_codes: torch.Tensor,
+    max_tokens: int,
+    temperature: float,
+    top_k: int,
+    seed: int,
+):
     """Hit boson-vllm's /v1/completions with the Higgs TTS prompt + audio_tokens."""
     url = f"{base}/v1/completions"
     prompt = f"<|tts|><|ref_audio|><|text|>{prompt_text}<|audio|>"
@@ -125,9 +132,7 @@ class _SglangPipeline:
         self.preprocess = create_preprocessing_executor(
             TTS_CKPT, audio_codec_device="cuda:0"
         )
-        self.audio_encoder = create_audio_encoder_executor(
-            TTS_CKPT, device="cuda:0"
-        )
+        self.audio_encoder = create_audio_encoder_executor(TTS_CKPT, device="cuda:0")
         self.aggregate = create_aggregate_executor()
         self.engine = create_sglang_tts_engine_executor(
             TTS_CKPT,
@@ -171,8 +176,15 @@ class _SglangPipeline:
         await self.vocoder.add_request(p)
         return await self.vocoder.get_result()
 
-    def run(self, prompt_wav: str, synth_text: str, temperature: float,
-            top_k: int, max_tokens: int, seed: int):
+    def run(
+        self,
+        prompt_wav: str,
+        synth_text: str,
+        temperature: float,
+        top_k: int,
+        max_tokens: int,
+        seed: int,
+    ):
         payload = StagePayload(
             request_id=str(uuid.uuid4()),
             request=OmniRequest(
@@ -191,6 +203,7 @@ class _SglangPipeline:
         )
         p = self.loop.run_until_complete(self._run_one(payload))
         from sglang_omni.models.higgs_tts.io import HiggsTtsState
+
         state = HiggsTtsState.from_dict(p.data)
         delayed = state.output_codes_delayed
         if not delayed:
@@ -206,7 +219,9 @@ def main():
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--out-dir", default="/ceph/workspace/huapeng/sglang-omni/_bench_out")
+    ap.add_argument(
+        "--out-dir", default="/ceph/workspace/huapeng/sglang-omni/_bench_out"
+    )
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -214,6 +229,7 @@ def main():
     print("Loading HiggsAudioCodec + Whisper...")
     codec = HiggsAudioCodec.from_tts_ckpt(TTS_CKPT, device="cuda")
     from faster_whisper import WhisperModel
+
     whisper = WhisperModel("large-v3", device="cuda", compute_type="float16")
 
     print("Building sglang-omni pipeline...")
@@ -234,7 +250,9 @@ def main():
 
         # ---- boson-vllm ----
         boson_codes, boson_finish = call_boson(
-            args.boson_base, synth_text, delayed,
+            args.boson_base,
+            synth_text,
+            delayed,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
@@ -249,7 +267,8 @@ def main():
         # The sglang-omni preprocessing encodes ref audio itself from the
         # audio_path. Codes should match since both use the same codec.
         sglang_codes, sglang_audio = sglang_pipe.run(
-            prompt_wav, synth_text,
+            prompt_wav,
+            synth_text,
             temperature=args.temperature,
             top_k=args.top_k,
             max_tokens=args.max_tokens,
@@ -277,21 +296,25 @@ def main():
             segments, _ = whisper.transcribe(out_wav, language="en", beam_size=5)
             hyp = " ".join(s.text for s in segments).strip()
             w = wer(synth_text, hyp)
-            print(f"  {tag}: dur={len(audio)/codec.SAMPLE_RATE:.2f}s WER={w:.3f} | {hyp!r}")
+            print(
+                f"  {tag}: dur={len(audio)/codec.SAMPLE_RATE:.2f}s WER={w:.3f} | {hyp!r}"
+            )
             return w, hyp
 
         w_b, hyp_b = _decode_and_whisper("boson", boson_codes, i)
         w_s, hyp_s = _decode_and_whisper("sglang", sglang_codes, i)
 
-        results.append({
-            "target": synth_text,
-            "boson_wer": w_b,
-            "sglang_wer": w_s,
-            "boson_hyp": hyp_b,
-            "sglang_hyp": hyp_s,
-            "boson_len": int(boson_codes.shape[0]),
-            "sglang_len": int(sglang_codes.shape[0]),
-        })
+        results.append(
+            {
+                "target": synth_text,
+                "boson_wer": w_b,
+                "sglang_wer": w_s,
+                "boson_hyp": hyp_b,
+                "sglang_hyp": hyp_s,
+                "boson_len": int(boson_codes.shape[0]),
+                "sglang_len": int(sglang_codes.shape[0]),
+            }
+        )
 
     print("\n" + "=" * 60 + "\nSummary\n" + "=" * 60)
     if not results:
@@ -306,8 +329,15 @@ def main():
         print(f"    sglang WER={r['sglang_wer']:.3f} hyp={r['sglang_hyp']!r}")
 
     with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
-        json.dump({"avg_boson_wer": float(avg_b), "avg_sglang_wer": float(avg_s),
-                   "results": results}, f, indent=2)
+        json.dump(
+            {
+                "avg_boson_wer": float(avg_b),
+                "avg_sglang_wer": float(avg_s),
+                "results": results,
+            },
+            f,
+            indent=2,
+        )
     print(f"\nWrote {args.out_dir}/summary.json")
 
 
