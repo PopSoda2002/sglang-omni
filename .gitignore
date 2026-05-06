@@ -44,3 +44,4 @@ _bench_out/
 .tune-runs/
 .claude/*
 !.claude/skills/
+_smoke_ckpt/

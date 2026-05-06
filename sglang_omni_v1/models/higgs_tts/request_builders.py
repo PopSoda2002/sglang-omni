@@ -80,6 +80,11 @@ def build_sglang_higgs_request(
         sampling_params=sampling_params,
         vocab_size=151_936,
     )
+    # V1's prefill manager probes these attrs on the Req. Fish sets them too;
+    # without them the scheduler crashes on the first prefill cycle with
+    # ``AttributeError: '_input_embeds_are_projected'``.
+    req._codec_suppress_tokens = None
+    req._input_embeds_are_projected = False
 
     return HiggsSGLangRequestData(
         input_ids=input_ids,
