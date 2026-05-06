@@ -1,19 +1,11 @@
-# SPDX-License-Identifier: Apache-2.0
-"""Streaming VAD wrapper used by the Realtime WebSocket session.
-
-Wraps silero-vad (ONNX) into a frame-by-frame state machine matching
-the OpenAI Realtime ``turn_detection`` semantics:
-
-    speech_started  ← prob ≥ threshold for ≥ 1 frame
-    speech_stopped  ← prob < threshold for silence_duration_ms continuously
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
 import numpy as np
+import torch
+from silero_vad import load_silero_vad
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +13,14 @@ logger = logging.getLogger(__name__)
 VAD_FRAME_SAMPLES = 512
 VAD_SAMPLE_RATE = 16000
 
-
 @dataclass
 class VADConfig:
     """Mirrors OpenAI Realtime ``turn_detection`` (server_vad mode)."""
-
+    # Probs greater than threshold are considered speech
     threshold: float = 0.5
+    # Prefix padding in milliseconds
     prefix_padding_ms: int = 300
+    # Silence duration in milliseconds
     silence_duration_ms: int = 500
 
 
@@ -35,28 +28,10 @@ class VADEvent:
     SPEECH_STARTED = "speech_started"
     SPEECH_STOPPED = "speech_stopped"
 
-
 @dataclass
 class Emit:
-    type: str
+    event_type: str
     sample_offset: int
-
-
-def load_silero_model() -> object:
-    """Construct a fresh silero-vad model instance.
-
-    Each session owns its own instance — silero carries LSTM hidden
-    state, so sharing across sessions would cross-contaminate VAD
-    decisions under concurrency.
-
-    If ``silero-vad`` isn't installed or the ONNX model fails to load,
-    the underlying exception (``ImportError`` / runtime error)
-    propagates. Callers don't catch.
-    """
-    from silero_vad import load_silero_vad  # type: ignore[import-not-found]
-
-    return load_silero_vad(onnx=True)
-
 
 class StreamingVAD:
     """Per-session frame-by-frame VAD state machine.
@@ -68,7 +43,7 @@ class StreamingVAD:
 
     def __init__(self, config: VADConfig | None = None) -> None:
         self.config = config or VADConfig()
-        self.model = load_silero_model()
+        self.vad_model = load_silero_vad(onnx=True)
         self.leftover_pcm = bytearray()
         self.samples_consumed = 0
         self.is_speech = False
@@ -91,12 +66,11 @@ class StreamingVAD:
 
             prob = self.infer(frame)
             self.samples_consumed += VAD_FRAME_SAMPLES
-            frame_end = self.samples_consumed
             speech = prob >= self.config.threshold
 
             if speech:
                 self.silence_run_samples = 0
-                self.last_speech_offset = frame_end
+                self.last_speech_offset = self.samples_consumed
                 if not self.is_speech:
                     self.is_speech = True
                     # OpenAI's contract: speech_started reports the start
@@ -105,9 +79,9 @@ class StreamingVAD:
                     pad = (
                         self.config.prefix_padding_ms * VAD_SAMPLE_RATE // 1000
                     )
-                    started_at = max(0, frame_end - VAD_FRAME_SAMPLES - pad)
+                    started_at = max(0, self.samples_consumed - VAD_FRAME_SAMPLES - pad)
                     emits.append(
-                        Emit(VADEvent.SPEECH_STARTED, sample_offset=started_at)
+                        Emit(event_type=VADEvent.SPEECH_STARTED, sample_offset=started_at)
                     )
             else:
                 self.silence_run_samples += VAD_FRAME_SAMPLES
@@ -119,7 +93,7 @@ class StreamingVAD:
                         self.is_speech = False
                         emits.append(
                             Emit(
-                                VADEvent.SPEECH_STOPPED,
+                                event_type=VADEvent.SPEECH_STOPPED,
                                 sample_offset=self.last_speech_offset,
                             )
                         )
@@ -127,11 +101,9 @@ class StreamingVAD:
         return emits
 
     def infer(self, frame: np.ndarray) -> float:
-        import torch
-
         with torch.inference_mode():
             tensor = torch.from_numpy(frame).unsqueeze(0)
-            prob = self.model(tensor, VAD_SAMPLE_RATE).item()
+            prob = self.vad_model(tensor, VAD_SAMPLE_RATE).item()
         return float(prob)
 
     def reset(self) -> None:
@@ -139,8 +111,8 @@ class StreamingVAD:
         self.is_speech = False
         self.silence_run_samples = 0
         self.last_speech_offset = self.samples_consumed
-        if hasattr(self.model, "reset_states"):
-            self.model.reset_states()  # type: ignore[union-attr]
+        if hasattr(self.vad_model, "reset_states"):
+            self.vad_model.reset_states()  # type: ignore[union-attr]
 
 
 def offsets_to_ms(samples: int) -> int:
@@ -151,4 +123,4 @@ def emits_for_test(pcm_bytes: bytes, **cfg) -> list[tuple[str, int]]:
     """Test helper: drive the VAD on a complete byte buffer."""
     vad = StreamingVAD(VADConfig(**cfg))
     emits = vad.process(pcm_bytes)
-    return [(e.type, offsets_to_ms(e.sample_offset)) for e in emits]
+    return [(e.event_type, offsets_to_ms(e.sample_offset)) for e in emits]
