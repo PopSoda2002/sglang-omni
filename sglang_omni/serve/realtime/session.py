@@ -50,6 +50,16 @@ DEFAULT_INSTRUCTIONS = (
     "ONLY the transcript — no descriptions, no refusals, no explanations."
 )
 
+HANDLERS: dict[type, str] = {
+    SessionUpdate: "handle_session_update",
+    InputAudioBufferAppend: "handle_audio_append",
+    InputAudioBufferCommit: "handle_audio_commit",
+    InputAudioBufferClear: "handle_audio_clear",
+    ConversationItemCreate: "handle_item_create",
+    ResponseCreate: "handle_response_create",
+    ResponseCancel: "handle_response_cancel",
+}
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
@@ -139,28 +149,18 @@ class RealtimeSession:
             if raw is None:
                 continue
             payload = json.loads(raw)
-            if not isinstance(payload, dict):
-                await self.send_error(
-                    code="invalid_request_error",
-                    message="Top-level payload must be a JSON object",
-                )
-                continue
+            assert isinstance(payload, dict), "Top-level payload must be a JSON object"
             await self.dispatch(payload)
 
     async def dispatch(self, payload: dict[str, Any]) -> None:
         event_type = payload.get("type")
-        if event_type not in SUPPORTED_CLIENT_EVENT_TYPES:
-            await self.send_error(
-                code="unsupported_event",
-                message=f"Event type {event_type!r} is not supported",
-                event_id=payload.get("event_id"),
-            )
-            return
-
+        assert event_type in SUPPORTED_CLIENT_EVENT_TYPES, (
+            f"Event type {event_type!r} is not supported"
+        )
         event = parse_client_event(payload)
         if event is None:
             return
-        method_name = self.HANDLERS.get(type(event))
+        method_name = HANDLERS.get(type(event))
         if method_name is not None:
             await getattr(self, method_name)(event)
 
@@ -170,28 +170,17 @@ class RealtimeSession:
         merged = self.session_object.model_dump() | update
         self.session_object = SessionObject.model_validate(merged)
 
-        unsupported = []
-        if self.session_object.input_audio_format != "pcm16":
-            unsupported.append(
-                f"input_audio_format={self.session_object.input_audio_format!r} "
-                "(only pcm16 is supported)"
-            )
-        if "audio" in (self.session_object.modalities or []):
-            unsupported.append(
-                "modalities=['audio'] is not yet supported (text-out only)"
-            )
+        assert self.session_object.input_audio_format == "pcm16", (
+            f"input_audio_format={self.session_object.input_audio_format!r} "
+            "(only pcm16 is supported)"
+        )
+        assert "audio" not in (self.session_object.modalities or []), (
+            "modalities=['audio'] is not yet supported (text-out only)"
+        )
         td = self.session_object.turn_detection
-        if td and td.type == "semantic_vad":
-            unsupported.append(
-                "turn_detection.type='semantic_vad' is not yet implemented"
-            )
-        if unsupported:
-            await self.send_error(
-                code="unsupported_session_config",
-                message="; ".join(unsupported),
-                event_id=event.event_id,
-            )
-            return
+        assert not (td and td.type == "semantic_vad"), (
+            "turn_detection.type='semantic_vad' is not yet implemented"
+        )
 
         if td is None or td.type in (None, "none"):
             self.vad = None
@@ -217,20 +206,9 @@ class RealtimeSession:
 
     async def handle_audio_append(self, event: InputAudioBufferAppend) -> None:
         decoded_len, err = self.audio_buffer.append_b64(event.audio)
-        if err == "overflow":
-            # Hard close: a client growing past the cap is malicious or
-            # buggy. Surface a structured error and tear down the WS.
-            await self.send_error(
-                code="input_audio_buffer_too_large",
-                message=(
-                    f"audio buffer would exceed cap of "
-                    f"{self.audio_buffer.max_bytes} bytes"
-                ),
-                event_id=event.event_id,
-            )
-            self.closed = True
-            await self.websocket.close(code=1009)  # 1009 = "message too big"
-            return
+        assert err != "overflow", (
+            f"audio buffer would exceed cap of {self.audio_buffer.max_bytes} bytes"
+        )
 
         if self.vad is None or decoded_len == 0:
             return
@@ -319,33 +297,15 @@ class RealtimeSession:
         await self.send(make_event("input_audio_buffer.cleared"))
 
     async def handle_audio_commit(self, event: InputAudioBufferCommit) -> None:
-        if self.audio_buffer.is_empty():
-            await self.send_error(
-                code="input_audio_buffer_commit_empty",
-                message="No audio in buffer to commit",
-                event_id=event.event_id,
-            )
-            return
+        assert not self.audio_buffer.is_empty(), "No audio in buffer to commit"
         payload = self.audio_buffer.to_wav_data_uri()
         self.drop_buffer_and_reset_vad()
-        if payload is None:
-            await self.send_error(
-                code="input_audio_buffer_commit_empty",
-                message="Audio buffer became empty before commit",
-                event_id=event.event_id,
-            )
-            return
+        assert payload is not None, "Audio buffer became empty before commit"
         await self.commit_user_audio_item(payload)
 
     async def handle_item_create(self, event: ConversationItemCreate) -> None:
         item = event.item
-        if item.type != "message":
-            await self.send_error(
-                code="unsupported_item_type",
-                message=f"item.type={item.type!r} not supported",
-                event_id=event.event_id,
-            )
-            return
+        assert item.type == "message", f"item.type={item.type!r} not supported"
 
         # Audio attachments belong on input_audio_buffer.*; this path is text-only.
         text_parts = [
@@ -371,25 +331,15 @@ class RealtimeSession:
         ))
 
     async def handle_response_create(self, event: ResponseCreate) -> None:
-        if self.active_task is not None and not self.active_task.done():
-            await self.send_error(
-                code="response_in_progress",
-                message="A response is already in progress",
-                event_id=event.event_id,
-            )
-            return
+        assert self.active_task is None or self.active_task.done(), (
+            "A response is already in progress"
+        )
 
         modalities = (
             event.response.modalities if event.response and event.response.modalities
             else self.session_object.modalities
         )
-        if "audio" in (modalities or []):
-            await self.send_error(
-                code="unsupported_modality",
-                message="audio output is not yet implemented",
-                event_id=event.event_id,
-            )
-            return
+        assert "audio" not in (modalities or []), "audio output is not yet implemented"
 
         self.active_task = asyncio.create_task(self.run_text_response(event))
 
@@ -580,19 +530,6 @@ class RealtimeSession:
         event.setdefault("event_id", new_id("evt"))
         await self.websocket.send_text(json.dumps(event))
 
-    async def send_error(
-        self, *, code: str, message: str, event_id: str | None = None,
-    ) -> None:
-        await self.send(make_event(
-            "error",
-            error={
-                "type": "invalid_request_error",
-                "code": code,
-                "message": message,
-                "event_id": event_id,
-            },
-        ))
-
     @property
     def previous_item_id(self) -> str | None:
         return self.conversation[-1].item_id if self.conversation else None
@@ -619,13 +556,3 @@ class RealtimeSession:
 
         if self.websocket.client_state == WebSocketState.CONNECTED:
             await self.websocket.close()
-
-    HANDLERS: dict[type, str] = {
-        SessionUpdate: "handle_session_update",
-        InputAudioBufferAppend: "handle_audio_append",
-        InputAudioBufferCommit: "handle_audio_commit",
-        InputAudioBufferClear: "handle_audio_clear",
-        ConversationItemCreate: "handle_item_create",
-        ResponseCreate: "handle_response_create",
-        ResponseCancel: "handle_response_cancel",
-    }

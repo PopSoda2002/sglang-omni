@@ -36,9 +36,6 @@
   const oscilloCtx    = oscilloCanvas.getContext("2d");
 
   const transcriptsEl = $("transcripts");
-  const logEl         = $("log");
-  const logDeltasEl   = $("log-deltas");
-  const clearLogBtn   = $("clear-log");
 
   // ─────────────────────  State  ─────────────────────
   let ws = null;
@@ -73,43 +70,34 @@
     micStatusEl.textContent = text;
   }
 
-  // ─────────────────────  Wire feed log  ─────────────────────
-
-  function logEntry(direction, payload) {
-    const t = payload && payload.type;
-    if (
-      t === "conversation.item.input_audio_transcription.delta" &&
-      !logDeltasEl.checked
-    ) {
-      return;
-    }
-    const arrow = direction === "in" ? "←" : "→";
-    const cls = direction === "in" ? "arrow-down" : "arrow-up";
-    const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
-    const summary = JSON.stringify(payload).slice(0, 280);
-    const line = document.createElement("div");
-    line.className = "row";
-    line.innerHTML =
-      `<span class="ts">${ts}</span>` +
-      `<span class="${cls}">${arrow}</span> ` +
-      escapeHtml(summary);
-    logEl.appendChild(line);
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;",
-      '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
+  // (Wire feed log removed — too noisy; protocol traffic only matters
+  // to me as the developer, not to anyone using the demo.)
 
   // ─────────────────────  WebSocket  ─────────────────────
 
   function wsSend(payload) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify(payload));
-    logEntry("out", payload);
+  }
+
+  function sendSessionUpdate() {
+    const sessionConfig = {
+      modalities: ["text"],
+      input_audio_format: "pcm16",
+      instructions: instructionsEl.value,
+      // Always include turn_detection so flipping the dropdown actually
+      // toggles server-side VAD instead of leaving stale config.
+      turn_detection:
+        modeEl.value === "server_vad"
+          ? {
+              type: "server_vad",
+              threshold: 0.5,
+              silence_duration_ms: 1000,
+              prefix_padding_ms: 300,
+            }
+          : { type: "none" },
+    };
+    wsSend({ type: "session.update", session: sessionConfig });
   }
 
   connectBtn.addEventListener("click", () => {
@@ -124,26 +112,11 @@
       disconnectBtn.disabled = false;
       micStartBtn.disabled = false;
 
-      const sessionConfig = {
-        modalities: ["text"],
-        input_audio_format: "pcm16",
-        instructions: instructionsEl.value,
-      };
-      if (modeEl.value === "server_vad") {
-        sessionConfig.turn_detection = {
-          type: "server_vad",
-          threshold: 0.5,
-          silence_duration_ms: 600,
-          prefix_padding_ms: 200,
-        };
-      }
-      wsSend({ type: "session.update", session: sessionConfig });
+      sendSessionUpdate();
     };
 
     ws.onmessage = (ev) => {
-      const evt = JSON.parse(ev.data);
-      logEntry("in", evt);
-      handleServerEvent(evt);
+      handleServerEvent(JSON.parse(ev.data));
     };
 
     ws.onclose = () => {
@@ -171,7 +144,18 @@
   // ─────────────────────  Microphone  ─────────────────────
 
   micStartBtn.addEventListener("click", () => startMic());
-  micStopBtn.addEventListener("click", () => stopMic());
+  micStopBtn.addEventListener("click", () => {
+    stopMic();
+    clearTranscripts();
+  });
+
+  function clearTranscripts() {
+    utteranceNodes.clear();
+    utteranceSerials.clear();
+    utteranceCounter = 0;
+    transcriptsEl.innerHTML =
+      '<p class="empty-state">The wire is quiet. Open it, then speak.</p>';
+  }
   commitBtn.addEventListener("click", () =>
     wsSend({ type: "input_audio_buffer.commit" }),
   );
@@ -180,19 +164,43 @@
   );
 
   async function startMic() {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Explicit constraints: force mono, request 16 kHz (browser may
+    // ignore but the AudioContext resamples regardless), and turn on
+    // echo / noise / auto-gain so the engine sees a clean signal.
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: TARGET_SR,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({
       sampleRate: TARGET_SR,
     });
 
     const source = audioCtx.createMediaStreamSource(micStream);
 
+    // Mix any stereo input to mono inside the worklet so we never
+    // accidentally send only one (potentially silent) channel.
     const workletCode = `
       class Forwarder extends AudioWorkletProcessor {
         process(inputs) {
-          const input = inputs[0];
-          if (input && input[0]) {
-            this.port.postMessage(input[0]);
+          const channels = inputs[0];
+          if (!channels || !channels[0]) return true;
+          if (channels.length === 1) {
+            this.port.postMessage(channels[0]);
+          } else {
+            const n = channels[0].length;
+            const mono = new Float32Array(n);
+            const c = channels.length;
+            for (let i = 0; i < n; i++) {
+              let sum = 0;
+              for (let k = 0; k < c; k++) sum += channels[k][i];
+              mono[i] = sum / c;
+            }
+            this.port.postMessage(mono);
           }
           return true;
         }
@@ -221,6 +229,14 @@
   }
 
   function stopMic() {
+    // If there's any audio still buffered server-side, commit it
+    // explicitly. Without this, server-VAD utterances that haven't
+    // hit silence_duration_ms hang forever; manual-mode buffers full
+    // of pending audio also get lost.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      wsSend({ type: "input_audio_buffer.commit" });
+    }
+
     if (workletNode) { workletNode.disconnect(); workletNode = null; }
     if (analyserNode) { analyserNode.disconnect(); analyserNode = null; }
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -344,8 +360,16 @@
         const node = ensureUtterance(evt.item_id, "completed");
         node.dataset.state = "completed";
         const body = node.querySelector(".utterance-body");
-        body.textContent = evt.transcript || body.textContent;
-        setItemMeta(evt.item_id, "completed");
+        const final = evt.transcript || body.textContent || "";
+        if (final.trim()) {
+          body.textContent = final;
+          setItemMeta(evt.item_id, "completed");
+        } else {
+          body.textContent = "[silent — model returned empty transcript]";
+          body.style.fontStyle = "italic";
+          body.style.color = "var(--ink-faint)";
+          setItemMeta(evt.item_id, "completed (empty)");
+        }
         return;
       }
 
@@ -414,9 +438,9 @@
     if (audioCtx) {
       commitBtn.disabled = modeEl.value === "server_vad";
     }
+    // Re-send so the server actually flips VAD on/off in step with the UI.
+    sendSessionUpdate();
   });
 
-  clearLogBtn.addEventListener("click", () => {
-    logEl.innerHTML = "";
-  });
+  instructionsEl.addEventListener("change", () => sendSessionUpdate());
 })();

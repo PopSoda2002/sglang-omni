@@ -59,14 +59,14 @@
         <label class="field">
           <span class="field-label">Turn Detection</span>
           <select id="mode">
-            <option value="manual" selected>Manual — operator commits</option>
-            <option value="server_vad">Server VAD — automatic</option>
+            <option value="manual">Manual — operator commits</option>
+            <option value="server_vad" selected>Server VAD — automatic (recommended)</option>
           </select>
         </label>
 
         <label class="field">
           <span class="field-label">Instructions to the Engine</span>
-          <textarea id="instructions" rows="3">You are a realtime speech-to-text engine. Transcribe the user's spoken audio verbatim into the same language they spoke. Output ONLY the transcript.</textarea>
+          <textarea id="instructions" rows="4">You are an automatic speech recognition (ASR) system. Output the EXACT words spoken in the audio, verbatim, in the same language. If the audio contains the word "hello", output "hello". Do NOT respond conversationally. Do NOT interpret, summarise, complete, or rephrase. If the audio is silent or unintelligible, output an empty string and nothing else.</textarea>
         </label>
 
         <div class="action-row">
@@ -133,29 +133,6 @@
     </article>
 
   </main>
-
-
-  <!-- ─────────────────────  WIRE FEED  ───────────────────── -->
-  <section class="wire-feed-section">
-    <header class="wire-head">
-      <h2 class="wire-title">
-        <span class="wire-num">iii</span>
-        Wire Feed
-        <span class="wire-byline">— protocol traffic, both directions</span>
-      </h2>
-
-      <label class="inline-toggle">
-        <input id="log-deltas" type="checkbox" />
-        <span>show <code>transcription.delta</code> frames</span>
-      </label>
-
-      <button id="clear-log" class="btn btn-ghost btn-small">Wipe</button>
-    </header>
-
-    <hr class="rule rule-thin" />
-
-    <pre id="log" class="wire-feed"></pre>
-  </section>
 
 
   <!-- ─────────────────────  COLOPHON  ───────────────────── -->
