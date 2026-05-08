@@ -486,13 +486,14 @@ class RealtimeSession:
         )
 
     def build_transcription_request(self, audio_payload: str) -> GenerateRequest:
-        # Short concrete user message prevents drift into description /
-        # refusal mode; the system prompt holds the framing.
+        # Neutral user message defers to the system prompt — the user's
+        # instructions might be transcribe / translate / something else,
+        # so we don't hard-code the operation here.
         return GenerateRequest(
             model=self.model_name,
             messages=[
                 Message(role="system", content=self.session_object.instructions or DEFAULT_INSTRUCTIONS),
-                Message(role="user", content="Transcribe the audio verbatim."),
+                Message(role="user", content="Follow the instructions above for the spoken audio."),
             ],
             sampling=self.base_sampling(),
             stream=True,
