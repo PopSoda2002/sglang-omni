@@ -134,10 +134,12 @@ class RealtimeSession:
         Uses raw ASGI ``receive()`` so a disconnect arrives in-band as
         ``"websocket.disconnect"`` rather than as a raised exception.
         """
-        await self.send(make_event(
-            "session.created",
-            session=self.session_object.model_dump(exclude_none=True),
-        ))
+        await self.send(
+            make_event(
+                "session.created",
+                session=self.session_object.model_dump(exclude_none=True),
+            )
+        )
 
         while not self.closed:
             message = await self.websocket.receive()
@@ -154,9 +156,9 @@ class RealtimeSession:
 
     async def dispatch(self, payload: dict[str, Any]) -> None:
         event_type = payload.get("type")
-        assert event_type in SUPPORTED_CLIENT_EVENT_TYPES, (
-            f"Event type {event_type!r} is not supported"
-        )
+        assert (
+            event_type in SUPPORTED_CLIENT_EVENT_TYPES
+        ), f"Event type {event_type!r} is not supported"
         event = parse_client_event(payload)
         if event is None:
             return
@@ -174,13 +176,13 @@ class RealtimeSession:
             f"input_audio_format={self.session_object.input_audio_format!r} "
             "(only pcm16 is supported)"
         )
-        assert "audio" not in (self.session_object.modalities or []), (
-            "modalities=['audio'] is not yet supported (text-out only)"
-        )
+        assert "audio" not in (
+            self.session_object.modalities or []
+        ), "modalities=['audio'] is not yet supported (text-out only)"
         td = self.session_object.turn_detection
-        assert not (td and td.type == "semantic_vad"), (
-            "turn_detection.type='semantic_vad' is not yet implemented"
-        )
+        assert not (
+            td and td.type == "semantic_vad"
+        ), "turn_detection.type='semantic_vad' is not yet implemented"
 
         if td is None or td.type in (None, "none"):
             self.vad = None
@@ -199,16 +201,18 @@ class RealtimeSession:
                 cfg_kwargs.get("threshold", "default"),
             )
 
-        await self.send(make_event(
-            "session.updated",
-            session=self.session_object.model_dump(exclude_none=True),
-        ))
+        await self.send(
+            make_event(
+                "session.updated",
+                session=self.session_object.model_dump(exclude_none=True),
+            )
+        )
 
     async def handle_audio_append(self, event: InputAudioBufferAppend) -> None:
         decoded_len, err = self.audio_buffer.append_b64(event.audio)
-        assert err != "overflow", (
-            f"audio buffer would exceed cap of {self.audio_buffer.max_bytes} bytes"
-        )
+        assert (
+            err != "overflow"
+        ), f"audio buffer would exceed cap of {self.audio_buffer.max_bytes} bytes"
 
         if self.vad is None or decoded_len == 0:
             return
@@ -224,17 +228,21 @@ class RealtimeSession:
             # Single-channel PCM16: 2 bytes/sample.
             vad_byte = max(0, emit.sample_offset * 2)
             self.utterance_start_byte = min(vad_byte, self.audio_buffer.num_bytes)
-            await self.send(make_event(
-                "input_audio_buffer.speech_started",
-                audio_start_ms=timestamp_ms,
-                item_id=new_id("item"),
-            ))
+            await self.send(
+                make_event(
+                    "input_audio_buffer.speech_started",
+                    audio_start_ms=timestamp_ms,
+                    item_id=new_id("item"),
+                )
+            )
         elif emit.event_type == VADEvent.SPEECH_STOPPED:
-            await self.send(make_event(
-                "input_audio_buffer.speech_stopped",
-                audio_end_ms=timestamp_ms,
-                item_id=new_id("item"),
-            ))
+            await self.send(
+                make_event(
+                    "input_audio_buffer.speech_stopped",
+                    audio_end_ms=timestamp_ms,
+                    item_id=new_id("item"),
+                )
+            )
             await self.auto_commit_utterance(emit.sample_offset)
 
     def drop_buffer_and_reset_vad(self) -> None:
@@ -258,16 +266,20 @@ class RealtimeSession:
         """
         item_id = new_id("item")
         previous = self.previous_item_id
-        await self.send(make_event(
-            "input_audio_buffer.committed",
-            previous_item_id=previous,
-            item_id=item_id,
-        ))
-        await self.send(make_event(
-            "conversation.item.created",
-            previous_item_id=previous,
-            item=user_audio_item(item_id),
-        ))
+        await self.send(
+            make_event(
+                "input_audio_buffer.committed",
+                previous_item_id=previous,
+                item_id=item_id,
+            )
+        )
+        await self.send(
+            make_event(
+                "conversation.item.created",
+                previous_item_id=previous,
+                item=user_audio_item(item_id),
+            )
+        )
         self.conversation.append(ConversationItem(item_id=item_id, role="user"))
 
         await self.transcription_queue.put((item_id, payload))
@@ -309,34 +321,42 @@ class RealtimeSession:
 
         # Audio attachments belong on input_audio_buffer.*; this path is text-only.
         text_parts = [
-            c.text for c in (item.content or [])
+            c.text
+            for c in (item.content or [])
             if c.type in ("input_text", "text") and c.text
         ]
         item_id = item.id or new_id("item")
         text = "\n".join(text_parts)
-        self.conversation.append(ConversationItem(
-            item_id=item_id, role=item.role or "user", text=text,
-        ))
-
-        await self.send(make_event(
-            "conversation.item.created",
-            previous_item_id=event.previous_item_id,
-            item={
-                "id": item_id,
-                "object": "realtime.item",
-                "type": "message",
-                "role": item.role or "user",
-                "content": [{"type": "input_text", "text": text}] if text else [],
-            },
-        ))
-
-    async def handle_response_create(self, event: ResponseCreate) -> None:
-        assert self.active_task is None or self.active_task.done(), (
-            "A response is already in progress"
+        self.conversation.append(
+            ConversationItem(
+                item_id=item_id,
+                role=item.role or "user",
+                text=text,
+            )
         )
 
+        await self.send(
+            make_event(
+                "conversation.item.created",
+                previous_item_id=event.previous_item_id,
+                item={
+                    "id": item_id,
+                    "object": "realtime.item",
+                    "type": "message",
+                    "role": item.role or "user",
+                    "content": [{"type": "input_text", "text": text}] if text else [],
+                },
+            )
+        )
+
+    async def handle_response_create(self, event: ResponseCreate) -> None:
+        assert (
+            self.active_task is None or self.active_task.done()
+        ), "A response is already in progress"
+
         modalities = (
-            event.response.modalities if event.response and event.response.modalities
+            event.response.modalities
+            if event.response and event.response.modalities
             else self.session_object.modalities
         )
         assert "audio" not in (modalities or []), "audio output is not yet implemented"
@@ -373,28 +393,33 @@ class RealtimeSession:
 
         text_acc: list[str] = []
         async for chunk in self.client.completion_stream(
-            self.build_transcription_request(audio_payload), request_id=request_id,
+            self.build_transcription_request(audio_payload),
+            request_id=request_id,
         ):
             if chunk.modality != "text":
                 continue
             if chunk.text:
                 text_acc.append(chunk.text)
-                await self.send(make_event(
-                    "conversation.item.input_audio_transcription.delta",
-                    item_id=item_id,
-                    content_index=0,
-                    delta=chunk.text,
-                ))
+                await self.send(
+                    make_event(
+                        "conversation.item.input_audio_transcription.delta",
+                        item_id=item_id,
+                        content_index=0,
+                        delta=chunk.text,
+                    )
+                )
             if chunk.finish_reason is not None:
                 break
 
         transcript = "".join(text_acc)
-        await self.send(make_event(
-            "conversation.item.input_audio_transcription.completed",
-            item_id=item_id,
-            content_index=0,
-            transcript=transcript,
-        ))
+        await self.send(
+            make_event(
+                "conversation.item.input_audio_transcription.completed",
+                item_id=item_id,
+                content_index=0,
+                transcript=transcript,
+            )
+        )
         for entry in self.conversation:
             if entry.item_id == item_id:
                 entry.audio_transcript = transcript
@@ -412,68 +437,79 @@ class RealtimeSession:
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
         self.active_request_id = request_id
 
-        await self.send(make_event(
-            "response.created",
-            response={
-                "id": response_id,
-                "object": "realtime.response",
-                "status": "in_progress",
-                "output": [],
-            },
-        ))
+        await self.send(
+            make_event(
+                "response.created",
+                response={
+                    "id": response_id,
+                    "object": "realtime.response",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            )
+        )
 
         item_id = new_id("item")
         text_acc: list[str] = []
         finish_reason = "stop"
         usage: dict[str, Any] | None = None
         async for chunk in self.client.completion_stream(
-            self.build_text_response_request(event), request_id=request_id,
+            self.build_text_response_request(event),
+            request_id=request_id,
         ):
             if chunk.modality == "text" and chunk.text:
                 text_acc.append(chunk.text)
-                await self.send(make_event(
-                    "response.text.delta",
-                    response_id=response_id,
-                    item_id=item_id,
-                    output_index=0,
-                    content_index=0,
-                    delta=chunk.text,
-                ))
+                await self.send(
+                    make_event(
+                        "response.text.delta",
+                        response_id=response_id,
+                        item_id=item_id,
+                        output_index=0,
+                        content_index=0,
+                        delta=chunk.text,
+                    )
+                )
             if chunk.finish_reason is not None:
                 finish_reason = chunk.finish_reason
                 usage = chunk.usage.to_dict() if chunk.usage else None
                 break
 
         transcript = "".join(text_acc)
-        await self.send(make_event(
-            "response.text.done",
-            response_id=response_id,
-            item_id=item_id,
-            output_index=0,
-            content_index=0,
-            text=transcript,
-        ))
+        await self.send(
+            make_event(
+                "response.text.done",
+                response_id=response_id,
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                text=transcript,
+            )
+        )
         self.conversation.append(
             ConversationItem(item_id=item_id, role="assistant", text=transcript)
         )
 
-        await self.send(make_event(
-            "response.done",
-            response={
-                "id": response_id,
-                "object": "realtime.response",
-                "status": "completed",
-                "status_details": {"reason": finish_reason},
-                "output": [{
-                    "id": item_id,
-                    "object": "realtime.item",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": transcript}],
-                }],
-                "usage": usage,
-            },
-        ))
+        await self.send(
+            make_event(
+                "response.done",
+                response={
+                    "id": response_id,
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "status_details": {"reason": finish_reason},
+                    "output": [
+                        {
+                            "id": item_id,
+                            "object": "realtime.item",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": transcript}],
+                        }
+                    ],
+                    "usage": usage,
+                },
+            )
+        )
         self.active_request_id = None
         self.active_response_id = None
 
@@ -492,8 +528,14 @@ class RealtimeSession:
         return GenerateRequest(
             model=self.model_name,
             messages=[
-                Message(role="system", content=self.session_object.instructions or DEFAULT_INSTRUCTIONS),
-                Message(role="user", content="Follow the instructions above for the spoken audio."),
+                Message(
+                    role="system",
+                    content=self.session_object.instructions or DEFAULT_INSTRUCTIONS,
+                ),
+                Message(
+                    role="user",
+                    content="Follow the instructions above for the spoken audio.",
+                ),
             ],
             sampling=self.base_sampling(),
             stream=True,

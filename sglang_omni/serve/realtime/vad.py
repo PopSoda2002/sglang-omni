@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 VAD_FRAME_SAMPLES = 512
 VAD_SAMPLE_RATE = 16000
 
+
 @dataclass
 class VADConfig:
     """Mirrors OpenAI Realtime ``turn_detection`` (server_vad mode)."""
+
     # Probs greater than threshold are considered speech
     threshold: float = 0.5
     # Prefix padding in milliseconds
@@ -28,10 +30,12 @@ class VADEvent:
     SPEECH_STARTED = "speech_started"
     SPEECH_STOPPED = "speech_stopped"
 
+
 @dataclass
 class Emit:
     event_type: str
     sample_offset: int
+
 
 class StreamingVAD:
     """Per-session frame-by-frame VAD state machine.
@@ -60,9 +64,7 @@ class StreamingVAD:
         while len(self.leftover_pcm) >= VAD_FRAME_SAMPLES * 2:
             frame_bytes = bytes(self.leftover_pcm[: VAD_FRAME_SAMPLES * 2])
             del self.leftover_pcm[: VAD_FRAME_SAMPLES * 2]
-            frame = (
-                np.frombuffer(frame_bytes, dtype="<i2").astype(np.float32) / 32768.0
-            )
+            frame = np.frombuffer(frame_bytes, dtype="<i2").astype(np.float32) / 32768.0
 
             prob = self.infer(frame)
             self.samples_consumed += VAD_FRAME_SAMPLES
@@ -76,12 +78,12 @@ class StreamingVAD:
                     # OpenAI's contract: speech_started reports the start
                     # offset *minus* prefix_padding so the caller includes
                     # a leading prefix in the committed audio.
-                    pad = (
-                        self.config.prefix_padding_ms * VAD_SAMPLE_RATE // 1000
-                    )
+                    pad = self.config.prefix_padding_ms * VAD_SAMPLE_RATE // 1000
                     started_at = max(0, self.samples_consumed - VAD_FRAME_SAMPLES - pad)
                     emits.append(
-                        Emit(event_type=VADEvent.SPEECH_STARTED, sample_offset=started_at)
+                        Emit(
+                            event_type=VADEvent.SPEECH_STARTED, sample_offset=started_at
+                        )
                     )
             else:
                 self.silence_run_samples += VAD_FRAME_SAMPLES
