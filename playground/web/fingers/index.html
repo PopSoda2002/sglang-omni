@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Counting House — sglang-omni vision demo</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ─────────────  HEADER  ───────────── -->
+  <header class="hd">
+    <div class="hd-row">
+      <span class="hd-eyebrow">sglang-omni · interaction demo</span>
+      <span class="hd-tag">vision</span>
+    </div>
+    <h1 class="hd-title">
+      <span class="hd-title-zh">数手指</span>
+      <span class="hd-title-en">Counting House</span>
+    </h1>
+    <p class="hd-tagline">
+      Hold up some fingers. The model watches the webcam, sees the frame,
+      and answers with a single digit — streamed end-to-end through
+      <code>/v1/chat/completions</code>.
+    </p>
+  </header>
+
+  <main class="main">
+
+    <!-- ─────────────  STAGE: video + readout  ───────────── -->
+    <section class="stage">
+      <div class="stage-video">
+        <video id="cam" autoplay playsinline muted></video>
+        <canvas id="snap" hidden></canvas>
+        <div class="stage-video-frame" aria-hidden="true"></div>
+        <div class="stage-video-tape" id="tape">camera off</div>
+      </div>
+
+      <aside class="stage-readout">
+        <div class="readout-label">predicted count</div>
+        <div class="readout-digit" id="digit">·</div>
+        <div class="readout-state" id="state">idle</div>
+
+        <hr class="hr" />
+
+        <div class="readout-stats">
+          <div class="stat">
+            <span class="stat-k">frames sent</span>
+            <span class="stat-v" id="stat-frames">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-k">latency p50</span>
+            <span class="stat-v" id="stat-p50">— ms</span>
+          </div>
+          <div class="stat">
+            <span class="stat-k">last reply</span>
+            <span class="stat-v" id="stat-last">— ms</span>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ─────────────  CONTROLS  ───────────── -->
+    <section class="controls">
+      <div class="ctl-group">
+        <label class="ctl">
+          <span class="ctl-k">endpoint</span>
+          <input id="server" type="text" value="http://127.0.0.1:8765/v1/chat/completions" />
+        </label>
+        <label class="ctl">
+          <span class="ctl-k">model</span>
+          <input id="model" type="text" value="qwen3-omni" />
+        </label>
+      </div>
+
+      <div class="ctl-group">
+        <label class="ctl">
+          <span class="ctl-k">mode</span>
+          <select id="mode">
+            <option value="live">Live — capture every N seconds</option>
+            <option value="snap" selected>Snap — one frame, on demand</option>
+          </select>
+        </label>
+        <label class="ctl">
+          <span class="ctl-k">interval</span>
+          <select id="interval">
+            <option value="600">0.6 s</option>
+            <option value="1000" selected>1.0 s</option>
+            <option value="1500">1.5 s</option>
+            <option value="2500">2.5 s</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="ctl-actions">
+        <button id="cam-on" class="btn btn-primary">Start camera</button>
+        <button id="cam-off" class="btn btn-ghost" disabled>Stop camera</button>
+        <button id="count-once" class="btn btn-secondary" disabled>Count now</button>
+        <button id="loop-toggle" class="btn btn-ghost" disabled>Begin live loop</button>
+      </div>
+    </section>
+
+    <!-- ─────────────  INTERACTION TIMELINE  ───────────── -->
+    <section class="timeline">
+      <header class="tl-head">
+        <h2 class="tl-title">Interaction timeline</h2>
+        <p class="tl-tagline">
+          Each tile is one frame sent to the model. The strip reads
+          left-to-right, oldest to newest — like the example rows in the
+          <a href="https://thinkingmachines.ai/blog/interaction-models/" target="_blank" rel="noopener">interaction-models</a> writeup.
+        </p>
+      </header>
+
+      <div class="tl-rows">
+        <div class="tl-row">
+          <span class="tl-label">frame</span>
+          <div class="tl-track tl-track-frames" id="track-frames">
+            <span class="tl-empty">no frames yet</span>
+          </div>
+        </div>
+
+        <div class="tl-row">
+          <span class="tl-label">sglang-omni</span>
+          <div class="tl-track tl-track-counts" id="track-counts">
+            <span class="tl-empty">awaiting first reply</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ─────────────  FOOTER  ───────────── -->
+  <footer class="ft">
+    <div class="ft-line">
+      <span>Set in <em>Fraunces</em> &amp; <em>Inter</em>. Code in <em>JetBrains&nbsp;Mono</em>.</span>
+      <span>Server: <code>sglang_omni/serve/openai_api.py</code></span>
+      <span>Inspired by <a href="https://thinkingmachines.ai/blog/interaction-models/" target="_blank" rel="noopener">Thinking Machines · interaction models</a>.</span>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
