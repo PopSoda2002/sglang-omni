@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -151,14 +152,24 @@ class RealtimeSession:
             if raw is None:
                 continue
             payload = json.loads(raw)
-            assert isinstance(payload, dict), "Top-level payload must be a JSON object"
+            if not isinstance(payload, dict):
+                await self.send_error(
+                    "invalid_request_error",
+                    "invalid_message",
+                    "Top-level payload must be a JSON object",
+                )
+                continue
             await self.dispatch(payload)
 
     async def dispatch(self, payload: dict[str, Any]) -> None:
         event_type = payload.get("type")
-        assert (
-            event_type in SUPPORTED_CLIENT_EVENT_TYPES
-        ), f"Event type {event_type!r} is not supported"
+        if event_type not in SUPPORTED_CLIENT_EVENT_TYPES:
+            await self.send_error(
+                "invalid_request_error",
+                "unknown_event",
+                f"Event type {event_type!r} is not supported",
+            )
+            return
         event = parse_client_event(payload)
         if event is None:
             return
@@ -172,17 +183,29 @@ class RealtimeSession:
         merged = self.session_object.model_dump() | update
         self.session_object = SessionObject.model_validate(merged)
 
-        assert self.session_object.input_audio_format == "pcm16", (
-            f"input_audio_format={self.session_object.input_audio_format!r} "
-            "(only pcm16 is supported)"
-        )
-        assert "audio" not in (
-            self.session_object.modalities or []
-        ), "modalities=['audio'] is not yet supported (text-out only)"
+        if self.session_object.input_audio_format != "pcm16":
+            await self.send_error(
+                "invalid_request_error",
+                "unsupported_audio_format",
+                f"input_audio_format={self.session_object.input_audio_format!r} "
+                "(only pcm16 is supported)",
+            )
+            return
+        if "audio" in (self.session_object.modalities or []):
+            await self.send_error(
+                "invalid_request_error",
+                "unsupported_modality",
+                "modalities=['audio'] is not yet supported (text-out only)",
+            )
+            return
         td = self.session_object.turn_detection
-        assert not (
-            td and td.type == "semantic_vad"
-        ), "turn_detection.type='semantic_vad' is not yet implemented"
+        if td is not None and td.type == "semantic_vad":
+            await self.send_error(
+                "invalid_request_error",
+                "unsupported_turn_detection",
+                "turn_detection.type='semantic_vad' is not yet implemented",
+            )
+            return
 
         if td is None or td.type in (None, "none"):
             self.vad = None
@@ -210,9 +233,13 @@ class RealtimeSession:
 
     async def handle_audio_append(self, event: InputAudioBufferAppend) -> None:
         decoded_len, err = self.audio_buffer.append_b64(event.audio)
-        assert (
-            err != "overflow"
-        ), f"audio buffer would exceed cap of {self.audio_buffer.max_bytes} bytes"
+        if err == "overflow":
+            await self.send_error(
+                "invalid_request_error",
+                "input_audio_buffer_overflow",
+                f"audio buffer would exceed cap of {self.audio_buffer.max_bytes} bytes",
+            )
+            return
 
         if self.vad is None or decoded_len == 0:
             return
@@ -309,17 +336,43 @@ class RealtimeSession:
         await self.send(make_event("input_audio_buffer.cleared"))
 
     async def handle_audio_commit(self, event: InputAudioBufferCommit) -> None:
-        assert not self.audio_buffer.is_empty(), "No audio in buffer to commit"
+        if self.audio_buffer.is_empty():
+            await self.send_error(
+                "invalid_request_error",
+                "input_audio_buffer_commit_empty",
+                "No audio in buffer to commit",
+            )
+            return
         payload = self.audio_buffer.to_wav_data_uri()
         self.drop_buffer_and_reset_vad()
-        assert payload is not None, "Audio buffer became empty before commit"
+        if payload is None:
+            await self.send_error(
+                "invalid_request_error",
+                "input_audio_buffer_commit_empty",
+                "Audio buffer became empty before commit",
+            )
+            return
         await self.commit_user_audio_item(payload)
 
     async def handle_item_create(self, event: ConversationItemCreate) -> None:
         item = event.item
-        assert item.type == "message", f"item.type={item.type!r} not supported"
+        if item.type != "message":
+            await self.send_error(
+                "invalid_request_error",
+                "unsupported_item_type",
+                f"item.type={item.type!r} not supported",
+            )
+            return
 
         # Audio attachments belong on input_audio_buffer.*; this path is text-only.
+        if any(c.type == "input_audio" for c in (item.content or [])):
+            await self.send_error(
+                "invalid_request_error",
+                "audio_content_not_supported",
+                "conversation.item.create does not accept input_audio; use "
+                "input_audio_buffer.append/.commit instead",
+            )
+            return
         text_parts = [
             c.text
             for c in (item.content or [])
@@ -350,16 +403,26 @@ class RealtimeSession:
         )
 
     async def handle_response_create(self, event: ResponseCreate) -> None:
-        assert (
-            self.active_task is None or self.active_task.done()
-        ), "A response is already in progress"
+        if self.active_task is not None and not self.active_task.done():
+            await self.send_error(
+                "invalid_request_error",
+                "response_in_progress",
+                "A response is already in progress",
+            )
+            return
 
         modalities = (
             event.response.modalities
             if event.response and event.response.modalities
             else self.session_object.modalities
         )
-        assert "audio" not in (modalities or []), "audio output is not yet implemented"
+        if "audio" in (modalities or []):
+            await self.send_error(
+                "invalid_request_error",
+                "unsupported_modality",
+                "audio output is not yet implemented",
+            )
+            return
 
         self.active_task = asyncio.create_task(self.run_text_response(event))
 
@@ -471,7 +534,11 @@ class RealtimeSession:
                 )
             if chunk.finish_reason is not None:
                 finish_reason = chunk.finish_reason
-                usage = chunk.usage.to_dict() if chunk.usage else None
+                usage = (
+                    dataclasses.asdict(chunk.usage)
+                    if chunk.usage is not None
+                    else None
+                )
                 break
 
         transcript = "".join(text_acc)
@@ -572,6 +639,20 @@ class RealtimeSession:
             return
         event.setdefault("event_id", new_id("evt"))
         await self.websocket.send_text(json.dumps(event))
+
+    async def send_error(self, type_: str, code: str, message: str) -> None:
+        """Emit an OpenAI-Realtime ``error`` event without closing.
+
+        Used by boundary validation in handlers — invalid client input
+        should produce a structured error a client can react to, not a
+        1006 WebSocket disconnect from an uncaught AssertionError.
+        """
+        await self.send(
+            make_event(
+                "error",
+                error={"type": type_, "code": code, "message": message},
+            )
+        )
 
     @property
     def previous_item_id(self) -> str | None:

@@ -34,9 +34,16 @@ class RealtimeSessionManager:
         logger.info("Realtime session opened: %s", session.session_id)
         return session
 
-    def close(self, session_id: str) -> None:
-        if self.sessions.pop(session_id, None) is not None:
-            logger.info("Realtime session closed: %s", session_id)
+    async def close(self, session_id: str) -> None:
+        session = self.sessions.pop(session_id, None)
+        if session is None:
+            return
+        # Always run teardown so GPU inference + asyncio tasks don't
+        # leak on unexpected disconnect. Without this, every dropped
+        # WebSocket left an active completion_stream + drainer task
+        # running until process exit.
+        await session.teardown()
+        logger.info("Realtime session closed: %s", session_id)
 
     def active_sessions(self) -> list[str]:
         return list(self.sessions.keys())

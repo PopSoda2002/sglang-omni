@@ -109,20 +109,20 @@ class StreamingVAD:
         return float(prob)
 
     def reset(self) -> None:
+        # samples_consumed is buffer-relative — it indexes bytes within
+        # the current audio_buffer, not session wall-clock time. After
+        # auto-commit drops the buffer, both this counter and the last
+        # speech marker must restart from zero or the next utterance's
+        # slice bounds will overshoot the now-empty buffer and silently
+        # drop audio.
         self.leftover_pcm.clear()
+        self.samples_consumed = 0
         self.is_speech = False
         self.silence_run_samples = 0
-        self.last_speech_offset = self.samples_consumed
+        self.last_speech_offset = 0
         if hasattr(self.vad_model, "reset_states"):
             self.vad_model.reset_states()  # type: ignore[union-attr]
 
 
 def offsets_to_ms(samples: int) -> int:
     return samples * 1000 // VAD_SAMPLE_RATE
-
-
-def emits_for_test(pcm_bytes: bytes, **cfg) -> list[tuple[str, int]]:
-    """Test helper: drive the VAD on a complete byte buffer."""
-    vad = StreamingVAD(VADConfig(**cfg))
-    emits = vad.process(pcm_bytes)
-    return [(e.event_type, offsets_to_ms(e.sample_offset)) for e in emits]

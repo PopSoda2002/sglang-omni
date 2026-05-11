@@ -15,9 +15,9 @@ Usage::
         --runs 10
 
 Reports p50 / p95 / max for first-delta and full-transcript latency.
-The numbers are meant to be persistent — checked into
-``benchmarks/baselines/realtime_latency_<host>.json`` and used by CI
-to catch regressions.
+Persistent numbers live in ``benchmarks/baselines/realtime_latency.py``
+(``BASELINES`` dict, keyed by hardware tag) and are used by CI to
+catch regressions.
 """
 
 from __future__ import annotations
