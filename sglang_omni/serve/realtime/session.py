@@ -557,9 +557,7 @@ class RealtimeSession:
             if chunk.finish_reason is not None:
                 finish_reason = chunk.finish_reason
                 usage = (
-                    dataclasses.asdict(chunk.usage)
-                    if chunk.usage is not None
-                    else None
+                    dataclasses.asdict(chunk.usage) if chunk.usage is not None else None
                 )
                 break
 

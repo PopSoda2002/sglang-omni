@@ -81,9 +81,7 @@ class RealtimeAudioBuffer:
         """Serialize the full buffer as a WAV data URI; ``None`` if empty."""
         return self.slice_to_wav_data_uri(start_byte=0, end_byte=len(self.buf))
 
-    def slice_to_wav_data_uri(
-        self, *, start_byte: int, end_byte: int
-    ) -> str | None:
+    def slice_to_wav_data_uri(self, *, start_byte: int, end_byte: int) -> str | None:
         """Slice ``[start_byte:end_byte]`` and emit a WAV data URI.
 
         Used by server-side VAD to commit only the speech segment.
