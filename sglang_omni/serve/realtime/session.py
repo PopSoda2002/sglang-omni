@@ -128,6 +128,13 @@ class RealtimeSession:
         # wall-clock ms after we drop the buffer.
         self.buffer_origin_samples = 0
         self.utterance_start_byte: int | None = None
+        # Per OpenAI Realtime spec, speech_started.item_id predicts the
+        # eventual committed item_id so clients can correlate the live
+        # VAD segment to its transcript. Minted on speech_started and
+        # reused through speech_stopped → committed → item.created →
+        # transcription.delta / .completed; cleared once the buffer
+        # drops so the next utterance gets a fresh id.
+        self.utterance_item_id: str | None = None
 
     async def run(self) -> None:
         """Drive the WebSocket loop.
@@ -255,11 +262,12 @@ class RealtimeSession:
             # Single-channel PCM16: 2 bytes/sample.
             vad_byte = max(0, emit.sample_offset * 2)
             self.utterance_start_byte = min(vad_byte, self.audio_buffer.num_bytes)
+            self.utterance_item_id = new_id("item")
             await self.send(
                 make_event(
                     "input_audio_buffer.speech_started",
                     audio_start_ms=timestamp_ms,
-                    item_id=new_id("item"),
+                    item_id=self.utterance_item_id,
                 )
             )
         elif emit.event_type == VADEvent.SPEECH_STOPPED:
@@ -267,7 +275,7 @@ class RealtimeSession:
                 make_event(
                     "input_audio_buffer.speech_stopped",
                     audio_end_ms=timestamp_ms,
-                    item_id=new_id("item"),
+                    item_id=self.utterance_item_id or new_id("item"),
                 )
             )
             await self.auto_commit_utterance(emit.sample_offset)
@@ -281,17 +289,25 @@ class RealtimeSession:
         self.buffer_origin_samples += self.audio_buffer.num_samples
         self.audio_buffer.clear()
         self.utterance_start_byte = None
+        self.utterance_item_id = None
         if self.vad is not None:
             self.vad.reset()
 
-    async def commit_user_audio_item(self, payload: str) -> None:
+    async def commit_user_audio_item(
+        self, payload: str, *, item_id: str | None = None
+    ) -> None:
         """Send committed → item.created → enqueue for transcription.
 
         Shared by manual ``input_audio_buffer.commit`` and VAD-driven
         auto-commit. Manual commits go through the same FIFO so they
         serialize cleanly against any in-flight VAD utterance.
+
+        ``item_id`` is the predicted id from ``speech_started`` when VAD
+        drove the commit; falls back to a fresh id for manual commits
+        that never saw a speech_started event.
         """
-        item_id = new_id("item")
+        if item_id is None:
+            item_id = new_id("item")
         previous = self.previous_item_id
         await self.send(
             make_event(
@@ -325,11 +341,14 @@ class RealtimeSession:
         )
         if payload is None:
             return
+        # Capture before reset — drop_buffer_and_reset_vad clears the
+        # utterance_item_id so the next utterance starts fresh.
+        item_id = self.utterance_item_id
         # Drop the entire buffer (committed speech + silence tail) and
         # advance the absolute origin so future speech_started/_stopped
         # stay wall-clock-correct.
         self.drop_buffer_and_reset_vad()
-        await self.commit_user_audio_item(payload)
+        await self.commit_user_audio_item(payload, item_id=item_id)
 
     async def handle_audio_clear(self, event: InputAudioBufferClear) -> None:
         self.drop_buffer_and_reset_vad()
@@ -344,6 +363,9 @@ class RealtimeSession:
             )
             return
         payload = self.audio_buffer.to_wav_data_uri()
+        # If VAD already predicted the item_id via speech_started, reuse
+        # it; otherwise commit_user_audio_item mints a fresh one.
+        item_id = self.utterance_item_id
         self.drop_buffer_and_reset_vad()
         if payload is None:
             await self.send_error(
@@ -352,7 +374,7 @@ class RealtimeSession:
                 "Audio buffer became empty before commit",
             )
             return
-        await self.commit_user_audio_item(payload)
+        await self.commit_user_audio_item(payload, item_id=item_id)
 
     async def handle_item_create(self, event: ConversationItemCreate) -> None:
         item = event.item
