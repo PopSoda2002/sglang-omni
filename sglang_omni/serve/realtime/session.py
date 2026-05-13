@@ -701,22 +701,21 @@ class RealtimeSession:
     async def teardown(self) -> None:
         """Cancel in-flight tasks and close the WebSocket.
 
-        Pending tasks are cancelled and waited on via ``asyncio.wait``,
-        which contains the resulting CancelledError. ``.exception()`` is
-        called explicitly so asyncio doesn't warn at GC.
+        Uses ``asyncio.gather(..., return_exceptions=True)`` instead of
+        ``.exception()`` because the latter re-raises ``CancelledError``
+        when called on a cancelled task — turning a routine disconnect
+        into a handler-level exception that aborts manager cleanup.
         """
         self.closed = True
         if self.active_task is not None and not self.active_task.done():
             if self.active_request_id is not None:
                 await self.client.abort(self.active_request_id)
             self.active_task.cancel()
-            await asyncio.wait({self.active_task})
-            self.active_task.exception()
+            await asyncio.gather(self.active_task, return_exceptions=True)
 
         if self.queue_drainer is not None and not self.queue_drainer.done():
             self.queue_drainer.cancel()
-            await asyncio.wait({self.queue_drainer})
-            self.queue_drainer.exception()
+            await asyncio.gather(self.queue_drainer, return_exceptions=True)
 
         if self.websocket.client_state == WebSocketState.CONNECTED:
             await self.websocket.close()
