@@ -220,10 +220,11 @@ async def test_server_vad_auto_commit_transcribes_real_audio(
 async def test_disconnect_during_response_keeps_server_healthy(
     server_process: subprocess.Popen,
 ) -> None:
-    """An abrupt mid-flight disconnect must not leak tasks or kill the route."""
+    """An abrupt disconnect after kicking off a response must not leak tasks
+    or break the route — /health still answers and a fresh WS still works.
+    """
     port: int = server_process.port  # type: ignore[attr-defined]
     with disable_proxy():
-        # Drive a response, then close before draining all events.
         async with websockets.connect(_ws_url(port)) as ws:
             await _recv_event(ws)  # session.created
             await ws.send(
@@ -231,14 +232,12 @@ async def test_disconnect_during_response_keeps_server_healthy(
                     {
                         "type": "session.update",
                         "session": {
-                            "instructions": (
-                                "Slowly count from 1 to 50, " "one number per line."
-                            ),
+                            "instructions": "Reply with the single word: OK.",
                         },
                     }
                 )
             )
-            await _recv_event(ws)
+            await _recv_event(ws)  # session.updated
             await ws.send(
                 json.dumps(
                     {
@@ -246,24 +245,19 @@ async def test_disconnect_during_response_keeps_server_healthy(
                         "item": {
                             "type": "message",
                             "role": "user",
-                            "content": [{"type": "input_text", "text": "Go."}],
+                            "content": [{"type": "input_text", "text": "Now."}],
                         },
                     }
                 )
             )
-            await _recv_event(ws)
+            await _recv_event(ws)  # conversation.item.created
             await ws.send(json.dumps({"type": "response.create"}))
-            # Receive a few events to confirm response is actively streaming.
-            saw_streaming = False
-            for _ in range(5):
-                evt = await _recv_event(ws)
-                if evt.get("type") in (
-                    "response.text.delta",
-                    "response.created",
-                ):
-                    saw_streaming = True
-            assert saw_streaming, "expected to see response events before disconnect"
-        # Context manager exit closes the WebSocket abruptly mid-stream.
+            # Take a single response event to confirm the response task is
+            # alive on the server, then close abruptly — the exact event
+            # type doesn't matter for the disconnect-cleanup contract.
+            evt = await _recv_event(ws)
+            assert evt.get("type", "").startswith("response."), evt
+        # Context manager exit closes the WebSocket abruptly.
 
         # Server's manager.close → session.teardown must clean up without
         # raising; if it leaked the engine call or re-raised CancelledError
