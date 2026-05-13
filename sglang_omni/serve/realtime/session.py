@@ -426,10 +426,12 @@ class RealtimeSession:
 
     async def handle_response_create(self, event: ResponseCreate) -> None:
         if self.active_task is not None and not self.active_task.done():
+            kind = "response" if self.active_response_id else "transcription"
             await self.send_error(
                 "invalid_request_error",
                 "response_in_progress",
-                "A response is already in progress",
+                f"A {kind} is already in progress; "
+                "wait for it to complete before sending response.create",
             )
             return
 
@@ -449,6 +451,15 @@ class RealtimeSession:
         self.active_task = asyncio.create_task(self.run_text_response(event))
 
     async def handle_response_cancel(self, event: ResponseCancel) -> None:
+        # ``active_response_id`` is set only inside ``run_text_response``,
+        # so it disambiguates an in-flight response from a transcription
+        # currently holding the same single ``active_task`` slot.
+        # ``response.cancel`` must only affect responses (per OpenAI
+        # spec) — without this guard it had been silently killing the
+        # in-flight transcription whenever a client sent response.cancel
+        # while VAD was still draining.
+        if self.active_response_id is None:
+            return
         if self.active_task is None or self.active_task.done():
             return
         if self.active_request_id is not None:
@@ -461,9 +472,18 @@ class RealtimeSession:
         ``asyncio.wait`` waits without re-raising the inner task's
         exception or cancellation, so a single failing utterance doesn't
         kill the drainer.
+
+        Response and transcription share a single ``active_task`` slot,
+        so the drainer waits for any in-flight response (or prior
+        transcription) to release the slot before claiming it. Without
+        this, a ``response.create`` task would get silently orphaned in
+        the background and ``response.cancel`` would cancel the wrong
+        engine stream.
         """
         while not self.closed:
             item_id, payload = await self.transcription_queue.get()
+            if self.active_task is not None and not self.active_task.done():
+                await asyncio.wait({self.active_task})
             self.active_task = asyncio.create_task(
                 self.run_transcription(item_id, payload)
             )
