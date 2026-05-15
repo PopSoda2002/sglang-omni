@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Real-server integration tests for the /v1/realtime WebSocket endpoint.
+"""Realtime WebSocket integration tests for Qwen3-Omni (Audio → Text).
 
 Launches a Qwen3-Omni thinker-only server with ``--enable-realtime`` and
 drives /v1/realtime via the ``websockets`` client library. Covers:
@@ -7,6 +7,12 @@ drives /v1/realtime via the ``websockets`` client library. Covers:
   - server VAD auto-commit + transcription end-to-end on a real wav;
   - clean teardown when the client disconnects mid-flight — the server
     must stay healthy and accept new connections.
+
+Usage:
+    pytest tests/test_model/test_qwen3_omni_realtime.py -s -x
+
+Author:
+    Huapeng Xu https://github.com/PopSoda2002
 """
 
 from __future__ import annotations
@@ -45,8 +51,6 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
     cmd = [
         sys.executable,
         "examples/run_qwen3_omni_server.py",
-        "--version",
-        "v1",
         "--model-path",
         MODEL_PATH,
         "--model-name",

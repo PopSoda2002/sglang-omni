@@ -33,9 +33,9 @@ from sglang_omni.serve.realtime.vad import (
     offsets_to_ms,
 )
 
-# Starlette's receive() returns ASGI messages directly; we handle the
-# disconnect message in-band instead of catching the WebSocketDisconnect
-# exception that receive_text() would otherwise raise.
+# note (huapeng): Starlette's receive() returns ASGI messages directly; we
+# handle disconnects in-band instead of catching WebSocketDisconnect from
+# receive_text().
 
 
 logger = logging.getLogger(__name__)
@@ -110,26 +110,26 @@ class RealtimeSession:
         self.conversation: list[ConversationItem] = []
         self.closed = False
 
-        self.active_request_id: str | None = None
         self.active_response_id: str | None = None
-        self.active_task: asyncio.Task | None = None
-        # VAD may emit multiple speech_stopped events while the engine
-        # is still busy on an earlier utterance — serialize them.
+        self.active_response_request_id: str | None = None
+        self.active_response_task: asyncio.Task | None = None
+        self.active_transcription_request_id: str | None = None
+        self.active_transcription_task: asyncio.Task | None = None
+        # note (huapeng): VAD may emit multiple speech_stopped events while the
+        # engine is still busy on an earlier utterance, so serialize them.
         self.transcription_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self.queue_drainer: asyncio.Task | None = None
 
         self.vad: StreamingVAD | None = None
-        # Absolute (session-wall-clock) sample offset of buffer byte 0.
-        # Advances each commit so speech_started/_stopped keep reporting
-        # wall-clock ms after we drop the buffer.
+        # note (huapeng): This is the session-wall-clock sample offset of
+        # buffer byte 0. It advances on commit so speech timestamps remain
+        # wall-clock-correct after dropping the buffer.
         self.buffer_origin_samples = 0
         self.utterance_start_byte: int | None = None
-        # Per OpenAI Realtime spec, speech_started.item_id predicts the
-        # eventual committed item_id so clients can correlate the live
-        # VAD segment to its transcript. Minted on speech_started and
-        # reused through speech_stopped → committed → item.created →
-        # transcription.delta / .completed; cleared once the buffer
-        # drops so the next utterance gets a fresh id.
+        # note (huapeng): speech_started.item_id predicts the eventual
+        # committed item_id so clients can correlate a live VAD segment to its
+        # transcript. Clear it when the buffer drops so the next utterance gets
+        # a fresh id.
         self.utterance_item_id: str | None = None
 
     async def run(self) -> None:
@@ -181,27 +181,28 @@ class RealtimeSession:
             await getattr(self, method_name)(event)
 
     async def handle_session_update(self, event: SessionUpdate) -> None:
-        # Pydantic merge: client-set fields overwrite, others keep value.
+        # note (huapeng): Build a candidate first so rejected updates do not
+        # leak into live session state.
         update = event.session.model_dump(exclude_none=True, exclude_unset=True)
         merged = self.session_object.model_dump() | update
-        self.session_object = SessionObject.model_validate(merged)
+        candidate = SessionObject.model_validate(merged)
 
-        if self.session_object.input_audio_format != "pcm16":
+        if candidate.input_audio_format != "pcm16":
             await self.send_error(
                 "invalid_request_error",
                 "unsupported_audio_format",
-                f"input_audio_format={self.session_object.input_audio_format!r} "
+                f"input_audio_format={candidate.input_audio_format!r} "
                 "(only pcm16 is supported)",
             )
             return
-        if "audio" in (self.session_object.modalities or []):
+        if "audio" in (candidate.modalities or []):
             await self.send_error(
                 "invalid_request_error",
                 "unsupported_modality",
                 "modalities=['audio'] is not yet supported (text-out only)",
             )
             return
-        td = self.session_object.turn_detection
+        td = candidate.turn_detection
         if td is not None and td.type == "semantic_vad":
             await self.send_error(
                 "invalid_request_error",
@@ -210,6 +211,7 @@ class RealtimeSession:
             )
             return
 
+        self.session_object = candidate
         if td is None or td.type in (None, "none"):
             self.vad = None
         elif td.type == "server_vad":
@@ -255,7 +257,7 @@ class RealtimeSession:
     async def handle_vad_emit(self, emit: Any) -> None:
         timestamp_ms = offsets_to_ms(self.buffer_origin_samples + emit.sample_offset)
         if emit.event_type == VADEvent.SPEECH_STARTED:
-            # Single-channel PCM16: 2 bytes/sample.
+            # note (huapeng): Single-channel PCM16 has 2 bytes/sample.
             vad_byte = max(0, emit.sample_offset * 2)
             self.utterance_start_byte = min(vad_byte, self.audio_buffer.num_bytes)
             self.utterance_item_id = new_id("item")
@@ -337,12 +339,11 @@ class RealtimeSession:
         )
         if payload is None:
             return
-        # Capture before reset — drop_buffer_and_reset_vad clears the
-        # utterance_item_id so the next utterance starts fresh.
+        # note (huapeng): Capture before reset because drop_buffer_and_reset_vad
+        # clears utterance_item_id for the next utterance.
         item_id = self.utterance_item_id
-        # Drop the entire buffer (committed speech + silence tail) and
-        # advance the absolute origin so future speech_started/_stopped
-        # stay wall-clock-correct.
+        # note (huapeng): Drop committed speech plus the silence tail and
+        # advance the origin so future VAD timestamps stay wall-clock-correct.
         self.drop_buffer_and_reset_vad()
         await self.commit_user_audio_item(payload, item_id=item_id)
 
@@ -359,8 +360,8 @@ class RealtimeSession:
             )
             return
         payload = self.audio_buffer.to_wav_data_uri()
-        # If VAD already predicted the item_id via speech_started, reuse
-        # it; otherwise commit_user_audio_item mints a fresh one.
+        # note (huapeng): Reuse a VAD-predicted item_id when present; manual
+        # commits without speech_started get a fresh id downstream.
         item_id = self.utterance_item_id
         self.drop_buffer_and_reset_vad()
         if payload is None:
@@ -382,7 +383,8 @@ class RealtimeSession:
             )
             return
 
-        # Audio attachments belong on input_audio_buffer.*; this path is text-only.
+        # note (huapeng): Audio attachments belong on input_audio_buffer.*;
+        # this path is text-only.
         if any(c.type == "input_audio" for c in (item.content or [])):
             await self.send_error(
                 "invalid_request_error",
@@ -421,13 +423,15 @@ class RealtimeSession:
         )
 
     async def handle_response_create(self, event: ResponseCreate) -> None:
-        if self.active_task is not None and not self.active_task.done():
-            kind = "response" if self.active_response_id else "transcription"
+        if (
+            self.active_response_task is not None
+            and not self.active_response_task.done()
+        ):
             await self.send_error(
                 "invalid_request_error",
                 "response_in_progress",
-                f"A {kind} is already in progress; "
-                "wait for it to complete before sending response.create",
+                "A response is already in progress; wait for it to complete "
+                "before sending response.create",
             )
             return
 
@@ -444,88 +448,83 @@ class RealtimeSession:
             )
             return
 
-        self.active_task = asyncio.create_task(self.run_text_response(event))
+        self.active_response_task = asyncio.create_task(self.run_text_response(event))
 
     async def handle_response_cancel(self, event: ResponseCancel) -> None:
-        # ``active_response_id`` is set only inside ``run_text_response``,
-        # so it disambiguates an in-flight response from a transcription
-        # currently holding the same single ``active_task`` slot.
-        # ``response.cancel`` must only affect responses (per OpenAI
-        # spec) — without this guard it had been silently killing the
-        # in-flight transcription whenever a client sent response.cancel
-        # while VAD was still draining.
         if self.active_response_id is None:
             return
-        if self.active_task is None or self.active_task.done():
+        if self.active_response_task is None or self.active_response_task.done():
             return
-        if self.active_request_id is not None:
-            await self.client.abort(self.active_request_id)
-        self.active_task.cancel()
+        if self.active_response_request_id is not None:
+            await self.client.abort(self.active_response_request_id)
+        self.active_response_task.cancel()
 
     async def drain_queue(self) -> None:
         """Pop utterances and run them serially through ``run_transcription``.
 
-        ``asyncio.wait`` waits without re-raising the inner task's
-        exception or cancellation, so a single failing utterance doesn't
-        kill the drainer.
-
-        Response and transcription share a single ``active_task`` slot,
-        so the drainer waits for any in-flight response (or prior
-        transcription) to release the slot before claiming it. Without
-        this, a ``response.create`` task would get silently orphaned in
-        the background and ``response.cancel`` would cancel the wrong
-        engine stream.
+        ``asyncio.gather(..., return_exceptions=True)`` collects the inner
+        task's exception or cancellation so one failing utterance does not kill
+        the drainer.
         """
         while not self.closed:
             item_id, payload = await self.transcription_queue.get()
-            if self.active_task is not None and not self.active_task.done():
-                await asyncio.wait({self.active_task})
-            self.active_task = asyncio.create_task(
+            if (
+                self.active_transcription_task is not None
+                and not self.active_transcription_task.done()
+            ):
+                await asyncio.gather(
+                    self.active_transcription_task,
+                    return_exceptions=True,
+                )
+            self.active_transcription_task = asyncio.create_task(
                 self.run_transcription(item_id, payload)
             )
-            await asyncio.wait({self.active_task})
-            # Retrieve any exception so asyncio doesn't warn at GC.
-            self.active_task.exception()
-            self.active_task = None
+            await asyncio.gather(
+                self.active_transcription_task,
+                return_exceptions=True,
+            )
+            self.active_transcription_task = None
 
     async def run_transcription(self, item_id: str, audio_payload: str) -> None:
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
-        self.active_request_id = request_id
+        self.active_transcription_request_id = request_id
 
-        text_acc: list[str] = []
-        async for chunk in self.client.completion_stream(
-            self.build_transcription_request(audio_payload),
-            request_id=request_id,
-        ):
-            if chunk.modality != "text":
-                continue
-            if chunk.text:
-                text_acc.append(chunk.text)
-                await self.send(
-                    make_event(
-                        "conversation.item.input_audio_transcription.delta",
-                        item_id=item_id,
-                        content_index=0,
-                        delta=chunk.text,
+        try:
+            text_acc: list[str] = []
+            async for chunk in self.client.completion_stream(
+                self.build_transcription_request(audio_payload),
+                request_id=request_id,
+            ):
+                if chunk.modality != "text":
+                    continue
+                if chunk.text:
+                    text_acc.append(chunk.text)
+                    await self.send(
+                        make_event(
+                            "conversation.item.input_audio_transcription.delta",
+                            item_id=item_id,
+                            content_index=0,
+                            delta=chunk.text,
+                        )
                     )
-                )
-            if chunk.finish_reason is not None:
-                break
+                if chunk.finish_reason is not None:
+                    break
 
-        transcript = "".join(text_acc)
-        await self.send(
-            make_event(
-                "conversation.item.input_audio_transcription.completed",
-                item_id=item_id,
-                content_index=0,
-                transcript=transcript,
+            transcript = "".join(text_acc)
+            await self.send(
+                make_event(
+                    "conversation.item.input_audio_transcription.completed",
+                    item_id=item_id,
+                    content_index=0,
+                    transcript=transcript,
+                )
             )
-        )
-        for entry in self.conversation:
-            if entry.item_id == item_id:
-                entry.audio_transcript = transcript
-                break
-        self.active_request_id = None
+            for entry in self.conversation:
+                if entry.item_id == item_id:
+                    entry.audio_transcript = transcript
+                    break
+        finally:
+            self.active_transcription_request_id = None
 
     async def run_text_response(self, event: ResponseCreate) -> None:
         """Emit response.created → response.text.delta × N → text.done → done.
@@ -536,85 +535,89 @@ class RealtimeSession:
         response_id = new_id("resp")
         self.active_response_id = response_id
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
-        self.active_request_id = request_id
+        self.active_response_request_id = request_id
 
-        await self.send(
-            make_event(
-                "response.created",
-                response={
-                    "id": response_id,
-                    "object": "realtime.response",
-                    "status": "in_progress",
-                    "output": [],
-                },
+        try:
+            await self.send(
+                make_event(
+                    "response.created",
+                    response={
+                        "id": response_id,
+                        "object": "realtime.response",
+                        "status": "in_progress",
+                        "output": [],
+                    },
+                )
             )
-        )
 
-        item_id = new_id("item")
-        text_acc: list[str] = []
-        finish_reason = "stop"
-        usage: dict[str, Any] | None = None
-        async for chunk in self.client.completion_stream(
-            self.build_text_response_request(event),
-            request_id=request_id,
-        ):
-            if chunk.modality == "text" and chunk.text:
-                text_acc.append(chunk.text)
-                await self.send(
-                    make_event(
-                        "response.text.delta",
-                        response_id=response_id,
-                        item_id=item_id,
-                        output_index=0,
-                        content_index=0,
-                        delta=chunk.text,
+            item_id = new_id("item")
+            text_acc: list[str] = []
+            finish_reason = "stop"
+            usage: dict[str, Any] | None = None
+            async for chunk in self.client.completion_stream(
+                self.build_text_response_request(event),
+                request_id=request_id,
+            ):
+                if chunk.modality == "text" and chunk.text:
+                    text_acc.append(chunk.text)
+                    await self.send(
+                        make_event(
+                            "response.text.delta",
+                            response_id=response_id,
+                            item_id=item_id,
+                            output_index=0,
+                            content_index=0,
+                            delta=chunk.text,
+                        )
                     )
-                )
-            if chunk.finish_reason is not None:
-                finish_reason = chunk.finish_reason
-                usage = (
-                    dataclasses.asdict(chunk.usage) if chunk.usage is not None else None
-                )
-                break
+                if chunk.finish_reason is not None:
+                    finish_reason = chunk.finish_reason
+                    usage = (
+                        dataclasses.asdict(chunk.usage)
+                        if chunk.usage is not None
+                        else None
+                    )
+                    break
 
-        transcript = "".join(text_acc)
-        await self.send(
-            make_event(
-                "response.text.done",
-                response_id=response_id,
-                item_id=item_id,
-                output_index=0,
-                content_index=0,
-                text=transcript,
+            transcript = "".join(text_acc)
+            await self.send(
+                make_event(
+                    "response.text.done",
+                    response_id=response_id,
+                    item_id=item_id,
+                    output_index=0,
+                    content_index=0,
+                    text=transcript,
+                )
             )
-        )
-        self.conversation.append(
-            ConversationItem(item_id=item_id, role="assistant", text=transcript)
-        )
+            self.conversation.append(
+                ConversationItem(item_id=item_id, role="assistant", text=transcript)
+            )
 
-        await self.send(
-            make_event(
-                "response.done",
-                response={
-                    "id": response_id,
-                    "object": "realtime.response",
-                    "status": "completed",
-                    "status_details": {"reason": finish_reason},
-                    "output": [
-                        {
-                            "id": item_id,
-                            "object": "realtime.item",
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": transcript}],
-                        }
-                    ],
-                    "usage": usage,
-                },
+            await self.send(
+                make_event(
+                    "response.done",
+                    response={
+                        "id": response_id,
+                        "object": "realtime.response",
+                        "status": "completed",
+                        "status_details": {"reason": finish_reason},
+                        "output": [
+                            {
+                                "id": item_id,
+                                "object": "realtime.item",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": transcript}],
+                            }
+                        ],
+                        "usage": usage,
+                    },
+                )
             )
-        )
-        self.active_request_id = None
-        self.active_response_id = None
+        finally:
+            self.active_response_request_id = None
+            self.active_response_id = None
 
     def base_sampling(self) -> SamplingParams:
         max_tokens = self.session_object.max_response_output_tokens
@@ -625,9 +628,8 @@ class RealtimeSession:
         )
 
     def build_transcription_request(self, audio_payload: str) -> GenerateRequest:
-        # Neutral user message defers to the system prompt — the user's
-        # instructions might be transcribe / translate / something else,
-        # so we don't hard-code the operation here.
+        # note (huapeng): Defer to the session prompt because instructions may
+        # ask for transcription, translation, or a different audio task.
         return GenerateRequest(
             model=self.model_name,
             messages=[
@@ -703,11 +705,23 @@ class RealtimeSession:
         into a handler-level exception that aborts manager cleanup.
         """
         self.closed = True
-        if self.active_task is not None and not self.active_task.done():
-            if self.active_request_id is not None:
-                await self.client.abort(self.active_request_id)
-            self.active_task.cancel()
-            await asyncio.gather(self.active_task, return_exceptions=True)
+        if (
+            self.active_response_task is not None
+            and not self.active_response_task.done()
+        ):
+            if self.active_response_request_id is not None:
+                await self.client.abort(self.active_response_request_id)
+            self.active_response_task.cancel()
+            await asyncio.gather(self.active_response_task, return_exceptions=True)
+
+        if (
+            self.active_transcription_task is not None
+            and not self.active_transcription_task.done()
+        ):
+            if self.active_transcription_request_id is not None:
+                await self.client.abort(self.active_transcription_request_id)
+            self.active_transcription_task.cancel()
+            await asyncio.gather(self.active_transcription_task, return_exceptions=True)
 
         if self.queue_drainer is not None and not self.queue_drainer.done():
             self.queue_drainer.cancel()
