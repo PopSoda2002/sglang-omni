@@ -41,11 +41,12 @@ from sglang_omni.proto import StagePayload
 logger = logging.getLogger(__name__)
 
 
-# Module-level cache so preprocessing and vocoder stages share one
-# ``HiggsAudioCodec`` instance when they're configured against the same
-# ``(path, device, dtype, source)``. Saves ~1 GB of VRAM and one load
-# pass at server startup.
-_CODEC_CACHE: dict[tuple[str, str, str, str], Any] = {}
+# Default open-source audio codec.
+DEFAULT_AUDIO_CODEC = "bosonai/higgs-audio-v2-tokenizer"
+
+# Shared codec instances between preprocessing and vocoder stages — saves
+# ~1 GB of VRAM + one load pass at server startup.
+_CODEC_CACHE: dict[tuple[str, str, str], Any] = {}
 
 
 def _resolve_checkpoint(checkpoint: str) -> str:
@@ -56,33 +57,16 @@ def _resolve_checkpoint(checkpoint: str) -> str:
     return snapshot_download(checkpoint)
 
 
-def _is_tts_ckpt(path: str) -> bool:
-    """A Higgs TTS ckpt carries ``tied.embedding.modality_embeddings`` keys
-    in its safetensors index; a standalone codec does not."""
-    index_path = os.path.join(path, "model.safetensors.index.json")
-    if not os.path.isfile(index_path):
-        return False
-    import json
-
-    with open(index_path) as f:
-        weight_map = json.load(f).get("weight_map", {})
-    return any(k.startswith("tied.embedding.modality_embeddings.") for k in weight_map)
-
-
 def _get_or_load_codec(path: str, device: str, dtype: str) -> Any:
     from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
 
-    source = "tts_ckpt" if _is_tts_ckpt(path) else "standalone"
-    key = (str(path), str(device), str(dtype), source)
+    key = (str(path), str(device), str(dtype))
     cached = _CODEC_CACHE.get(key)
     if cached is not None:
         return cached
-
-    torch_dtype = getattr(torch, dtype)
-    if source == "tts_ckpt":
-        codec = HiggsAudioCodec.from_tts_ckpt(path, device=device, dtype=torch_dtype)
-    else:
-        codec = HiggsAudioCodec.from_pretrained(path, device=device, dtype=torch_dtype)
+    codec = HiggsAudioCodec.from_pretrained(
+        path, device=device, dtype=getattr(torch, dtype)
+    )
     _CODEC_CACHE[key] = codec
     return codec
 
@@ -166,7 +150,7 @@ def create_preprocessing_executor(
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw)
     adapter = HiggsTokenizerAdapter(tokenizer)
 
-    codec_src = audio_codec_path if audio_codec_path is not None else checkpoint_dir
+    codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
     codec = _get_or_load_codec(codec_src, audio_codec_device, audio_codec_dtype)
 
     def _preprocess(payload: StagePayload) -> StagePayload:
@@ -368,8 +352,8 @@ def create_vocoder_executor(
     from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
-    checkpoint_dir = _resolve_checkpoint(model_path)
-    codec_src = audio_codec_path if audio_codec_path is not None else checkpoint_dir
+    del model_path  # vocoder needs only the codec, not the TTS ckpt
+    codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
     codec = _get_or_load_codec(codec_src, device, dtype)
     sample_rate = HiggsAudioCodec.SAMPLE_RATE
 

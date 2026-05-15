@@ -14,9 +14,6 @@ from transformers import AutoConfig
 from . import config
 from .hf_config import HiggsMultimodalQwen3Config
 
-try:
-    AutoConfig.register("higgs_multimodal_qwen3", HiggsMultimodalQwen3Config)
-except (ValueError, KeyError):
-    pass  # already registered
+AutoConfig.register("higgs_multimodal_qwen3", HiggsMultimodalQwen3Config)
 
 __all__ = ["config", "HiggsMultimodalQwen3Config"]

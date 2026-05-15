@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Vendored ``HiggsAudioV2TokenizerConfig`` / ``HiggsAudioV2TokenizerModel``.
 
-Combines the upstream config + modeling files into one module and applies
-a minimal ``transformers<5`` compatibility shim:
-replaces ``from transformers import initialization`` with a
-``torch.nn.init``-backed shim that also exposes ``init.copy_``.
-
 Upstream reference: https://github.com/huggingface/transformers/pull/40294
 """
 
