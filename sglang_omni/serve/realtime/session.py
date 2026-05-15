@@ -11,24 +11,10 @@ from typing import Any
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
 
-# Starlette's receive() returns ASGI messages directly; we handle the
-# disconnect message in-band instead of catching the WebSocketDisconnect
-# exception that receive_text() would otherwise raise.
-
-from sglang_omni.client import (
-    Client,
-    GenerateRequest,
-    Message,
-    SamplingParams,
-)
+from sglang_omni.client import Client, GenerateRequest, Message, SamplingParams
 from sglang_omni.serve.realtime.audio_buffer import RealtimeAudioBuffer
-from sglang_omni.serve.realtime.vad import (
-    StreamingVAD,
-    VADConfig,
-    VADEvent,
-    offsets_to_ms,
-)
 from sglang_omni.serve.realtime.events import (
+    SUPPORTED_CLIENT_EVENT_TYPES,
     ConversationItemCreate,
     InputAudioBufferAppend,
     InputAudioBufferClear,
@@ -37,10 +23,20 @@ from sglang_omni.serve.realtime.events import (
     ResponseCreate,
     SessionObject,
     SessionUpdate,
-    SUPPORTED_CLIENT_EVENT_TYPES,
     make_event,
     parse_client_event,
 )
+from sglang_omni.serve.realtime.vad import (
+    StreamingVAD,
+    VADConfig,
+    VADEvent,
+    offsets_to_ms,
+)
+
+# Starlette's receive() returns ASGI messages directly; we handle the
+# disconnect message in-band instead of catching the WebSocketDisconnect
+# exception that receive_text() would otherwise raise.
+
 
 logger = logging.getLogger(__name__)
 
