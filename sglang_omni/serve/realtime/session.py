@@ -675,7 +675,7 @@ class RealtimeSession:
     async def send(self, event: dict[str, Any]) -> None:
         if self.closed:
             return
-        if self.websocket.client_state != WebSocketState.CONNECTED:
+        if self.websocket.application_state != WebSocketState.CONNECTED:
             return
         event.setdefault("event_id", new_id("evt"))
         await self.websocket.send_text(json.dumps(event))

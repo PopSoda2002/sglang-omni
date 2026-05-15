@@ -470,7 +470,7 @@ def _register_realtime(app: FastAPI) -> None:
         try:
             await session.run()
         finally:
-            manager.close(session.session_id)
+            await manager.close(session.session_id)
 
 
 def _register_speech(app: FastAPI) -> None:
