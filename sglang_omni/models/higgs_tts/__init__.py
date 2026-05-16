@@ -3,8 +3,9 @@
 
 Registers :class:`HiggsMultimodalQwen3Config` with ``transformers.AutoConfig`` on
 import so ``AutoConfig.from_pretrained()`` works before any Higgs stage factory
-runs. The model class is registered lazily in
-:func:`bootstrap.register_higgs_tts_in_sglang` when the tts_engine stage starts.
+runs. The model class is registered in
+:meth:`sglang_omni.model_runner.sglang_model_runner.SGLModelRunner._register_omni_model`
+alongside the other sglang-omni models.
 """
 
 from __future__ import annotations

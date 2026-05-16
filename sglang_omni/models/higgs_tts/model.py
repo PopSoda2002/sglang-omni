@@ -4,8 +4,8 @@
 Composes sglang's built-in :class:`sglang.srt.models.qwen3.Qwen3ForCausalLM`
 as the text backbone with the fused multi-codebook embedding / head.
 Registered in sglang's ``ModelRegistry`` under
-``HiggsMultimodalQwen3ForConditionalGeneration`` via
-:func:`sglang_omni.models.higgs_tts.bootstrap.register_higgs_tts_in_sglang`.
+``HiggsMultimodalQwen3ForConditionalGeneration`` by
+:meth:`sglang_omni.model_runner.sglang_model_runner.SGLModelRunner._register_omni_model`.
 """
 
 from __future__ import annotations

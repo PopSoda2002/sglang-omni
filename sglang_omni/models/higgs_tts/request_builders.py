@@ -17,20 +17,20 @@ from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 class HiggsSGLangRequestData(SGLangARRequestData):
     """Per-request state for the Higgs TTS scheduler.
 
-    Carries the precomputed reference-audio embedding from the
-    ``audio_encoder`` stage plus the running list of multi-codebook codes
-    emitted by :class:`HiggsTTSModel`.
+    Carries the delayed reference-audio codes (consumed inline by the model
+    runner via the fused multi-codebook embedding) plus the running list of
+    multi-codebook codes emitted by :class:`HiggsTTSModel`.
     """
 
-    reference_audio_embed: torch.Tensor | None = None
-    """Pre-computed fused audio embedding, shape ``[num_ref_tokens,
-    hidden_size]``. Pasted at ``-100`` placeholder positions in the
-    scheduler's prepare_prefill hook."""
+    reference_codes_delayed: list[list[int]] | None = None
+    """Delayed ref-audio codes ``[num_ref_tokens, num_codebooks]``. The
+    runner computes the fused embedding inline in ``prepare_prefill`` and
+    pastes it at the ``-100`` placeholder positions."""
 
     num_ref_codes_consumed: int = 0
-    """Count of rows from ``reference_audio_embed`` already overlaid onto
-    earlier prefill chunks. Advanced by the model runner so chunked prefill
-    slices the embed tensor correctly across multiple extend calls."""
+    """Rows of ``reference_codes_delayed`` already overlaid onto earlier
+    prefill chunks. Advanced by the model runner so chunked prefill slices
+    correctly across multiple extend calls."""
 
     num_codebooks: int = 8
     codebook_size: int = 1026
@@ -41,14 +41,6 @@ class HiggsSGLangRequestData(SGLangARRequestData):
     ``post_decode``."""
 
     generation_done: bool = False
-
-
-def _to_tensor(value: Any, dtype: torch.dtype = torch.float32) -> torch.Tensor | None:
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        return value.to(dtype=dtype) if value.dtype != dtype else value
-    return torch.tensor(value, dtype=dtype)
 
 
 def build_sglang_higgs_request(
@@ -89,7 +81,7 @@ def build_sglang_higgs_request(
     return HiggsSGLangRequestData(
         input_ids=input_ids,
         req=req,
-        reference_audio_embed=_to_tensor(state.reference_audio_embed),
+        reference_codes_delayed=state.reference_codes_delayed,
         num_codebooks=int(state.num_codebooks),
         codebook_size=int(state.codebook_size),
         max_new_tokens=int(state.max_new_tokens),

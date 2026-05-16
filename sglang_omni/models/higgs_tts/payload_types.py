@@ -2,8 +2,6 @@
 """Per-request pipeline state for Higgs TTS.
 
 Carried between stages via :class:`sglang_omni.proto.StagePayload.data`.
-Mirrors :class:`sglang_omni.models.higgs_tts.io.HiggsTtsState` from the V0
-package — same wire format so V0/V1 can exchange state in tests.
 """
 
 from __future__ import annotations
@@ -14,22 +12,30 @@ from typing import Any
 
 @dataclass
 class HiggsTtsState:
-    """Per-request state for the Higgs TTS pipeline."""
+    """Per-request state for the Higgs TTS pipeline.
 
+    preprocessing → audio_encoder → tts_engine → vocoder. Each stage reads /
+    writes fields below; fields are populated lazily so a deserialised state
+    works at any stage boundary.
+    """
+
+    # Filled by preprocessing (or audio_encoder, depending on raw-vs-encoded
+    # ref-audio path).
     prompt_token_ids: list[int] = field(default_factory=list)
     """Prompt ids with ``AUDIO_PLACEHOLDER_ID`` (-100) at ref-audio positions."""
 
     reference_codes_delayed: list[list[int]] | None = None
-    """Delayed ref-audio codes, shape ``[num_ref_tokens, num_codebooks]`` as a
-    nested list. ``None`` for zero-shot."""
-
-    reference_audio_embed: Any | None = None
-    """Pre-computed fused audio embedding, shape ``[num_ref_tokens, hidden_size]``,
-    pasted at ``-100`` placeholder positions by the engine prefill. ``None`` for
-    zero-shot. Stored as a CPU fp32 ``torch.Tensor`` — ``pipeline.relay_io.extract_tensors``
-    ships any tensor in ``StagePayload.data`` over the raw tensor buffer instead
-    of pickling it (the embed is MB-scale for long references).
+    """Delayed ref-audio codes ``[num_ref_tokens, num_codebooks]``. ``None`` for
+    zero-shot. Consumed by tts_engine prefill to compute the fused multi-codebook
+    embedding inline (the ``-100`` overlay).
     """
+
+    # Carried from preprocessing to audio_encoder when raw waveform input.
+    target_text: str | None = None
+    reference_text: str | None = None
+    reference_waveform: Any | None = None
+    """Mono 24 kHz float32 waveform ``torch.Tensor`` ([1, 1, L]). ``None`` once
+    audio_encoder has consumed it (or for the pre-encoded fast path)."""
 
     num_codebooks: int = 8
     codebook_size: int = 1026  # 1024 data + <|boc|> + <|eoc|>
@@ -65,8 +71,12 @@ class HiggsTtsState:
         }
         if self.reference_codes_delayed is not None:
             data["reference_codes_delayed"] = self.reference_codes_delayed
-        if self.reference_audio_embed is not None:
-            data["reference_audio_embed"] = self.reference_audio_embed
+        if self.target_text is not None:
+            data["target_text"] = self.target_text
+        if self.reference_text is not None:
+            data["reference_text"] = self.reference_text
+        if self.reference_waveform is not None:
+            data["reference_waveform"] = self.reference_waveform
         for key in ("top_p", "top_k", "seed"):
             value = getattr(self, key)
             if value is not None:
@@ -87,7 +97,9 @@ class HiggsTtsState:
         return cls(
             prompt_token_ids=list(data.get("prompt_token_ids", [])),
             reference_codes_delayed=data.get("reference_codes_delayed"),
-            reference_audio_embed=data.get("reference_audio_embed"),
+            target_text=data.get("target_text"),
+            reference_text=data.get("reference_text"),
+            reference_waveform=data.get("reference_waveform"),
             num_codebooks=data.get("num_codebooks", 8),
             codebook_size=data.get("codebook_size", 1026),
             max_new_tokens=data.get("max_new_tokens", 2048),

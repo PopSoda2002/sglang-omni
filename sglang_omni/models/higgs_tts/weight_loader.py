@@ -3,31 +3,13 @@
 
 Higgs checkpoints use prefixes like ``tied.embedding.text_embedding.`` and
 ``body.layers.``; sglang expects its own parameter-tree layout. The mapping
-function is parameterised by the destination prefix so other layouts can be
-supported by swapping the ``text_prefix_map``.
+function is parameterised by the destination prefix so different model
+wrappers can supply their own layout.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-# Nested ``language_model.model.*`` layout (vllm-style). Available as a
-# preset; callers pass a custom map to :class:`DiscreteWeightMapper` for
-# other layouts.
-HIGGS_TEXT_PREFIX_MAP_VLLM: dict[str, str] = {
-    "tied.embedding.text_embedding.": "language_model.model.embed_tokens.",
-    "body.layers.": "language_model.model.layers.",
-    "body.norm.": "language_model.model.norm.",
-    "tied.head.text_head.": "language_model.lm_head.",
-}
-
-# Flat sglang-native layout: no ``language_model.`` wrapper.
-HIGGS_TEXT_PREFIX_MAP_SGLANG: dict[str, str] = {
-    "tied.embedding.text_embedding.": "embed_tokens.",
-    "body.layers.": "layers.",
-    "body.norm.": "norm.",
-    "tied.head.text_head.": "lm_head.",
-}
 
 
 @dataclass(frozen=True)
@@ -36,7 +18,7 @@ class DiscreteWeightMapper:
 
     Args:
         text_prefix_map: Maps Higgs prefixes for the text backbone to the
-            downstream parameter tree. See ``HIGGS_TEXT_PREFIX_MAP_*`` above.
+            downstream parameter tree.
         embedding_dest: Destination prefix for
             ``tied.embedding.modality_embeddings.0.embedding.*`` (the fused
             multi-codebook embedding weight).
@@ -86,22 +68,4 @@ class DiscreteWeightMapper:
         return name
 
 
-def map_higgs_discrete_weight_name(
-    name: str,
-    *,
-    text_prefix_map: dict[str, str] = HIGGS_TEXT_PREFIX_MAP_SGLANG,
-    tie_modality: bool = True,
-) -> str | None:
-    """Convenience wrapper around :class:`DiscreteWeightMapper` for one-shot use."""
-    return DiscreteWeightMapper(
-        text_prefix_map=text_prefix_map,
-        tie_modality=tie_modality,
-    ).map(name)
-
-
-__all__ = [
-    "DiscreteWeightMapper",
-    "HIGGS_TEXT_PREFIX_MAP_SGLANG",
-    "HIGGS_TEXT_PREFIX_MAP_VLLM",
-    "map_higgs_discrete_weight_name",
-]
+__all__ = ["DiscreteWeightMapper"]
