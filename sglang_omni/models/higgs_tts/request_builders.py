@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from sglang.srt.managers.schedule_batch import Req
+from sglang.srt.sampling.sampling_params import SamplingParams
 
 from sglang_omni.models.higgs_tts.payload_types import HiggsTtsState
 from sglang_omni.proto import StagePayload
@@ -28,9 +30,6 @@ class HiggsSGLangRequestData(SGLangARRequestData):
 def build_sglang_higgs_request(
     state: HiggsTtsState, *, request_id: str = ""
 ) -> HiggsSGLangRequestData:
-    from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.sampling.sampling_params import SamplingParams
-
     input_ids_list = list(state.prompt_token_ids)
     input_ids = torch.tensor(input_ids_list, dtype=torch.long)
 
@@ -76,7 +75,7 @@ def apply_higgs_result(state: HiggsTtsState, data: HiggsSGLangRequestData) -> No
         state.completion_tokens = int(codes.shape[0])
     else:
         state.output_codes_delayed = None
-    state.prompt_tokens = len(data.input_ids) if data.input_ids is not None else 0
+    state.prompt_tokens = len(data.input_ids)
 
 
 def make_higgs_scheduler_adapters():

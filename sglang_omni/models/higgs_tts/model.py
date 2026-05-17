@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Iterable, Tuple
 
 import torch
+from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.models.qwen3 import Qwen3ForCausalLM
 from torch import nn
 
 from sglang_omni.models.higgs_tts.hf_config import HiggsMultimodalQwen3Config
@@ -89,8 +91,6 @@ class HiggsTTSModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        from sglang.srt.models.qwen3 import Qwen3ForCausalLM
-
         self.config = config
 
         text_config = config.get_text_config()
@@ -237,8 +237,6 @@ class HiggsTTSModel(nn.Module):
         :class:`HiggsTTSModelRunner._build_prefill_input_embeds`).
         Decode: input_embeds is rebuilt here from each slot's ``last_codes``.
         """
-        from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-
         req_ids, gen_params = self._extract_batch_metadata(forward_batch)
 
         if input_embeds is None and self._is_decode_step(forward_batch):
@@ -305,14 +303,7 @@ class HiggsTTSModel(nn.Module):
             val = getattr(sampling_info, attr, None)
             if val is None:
                 return default
-            try:
-                return (
-                    float(val[row].item())
-                    if hasattr(val[row], "item")
-                    else float(val[row])
-                )
-            except (TypeError, IndexError):
-                return default
+            return float(val[row].item() if hasattr(val[row], "item") else val[row])
 
         return HiggsGenParams(
             temperature=_pick("temperatures", 1.0),
@@ -322,19 +313,10 @@ class HiggsTTSModel(nn.Module):
 
     @staticmethod
     def _infer_batch_size(forward_batch) -> int:
-        for attr in ("batch_size", "extend_seq_lens", "seq_lens", "req_pool_indices"):
-            val = getattr(forward_batch, attr, None)
-            if val is None:
-                continue
-            if isinstance(val, int):
-                return val
-            if hasattr(val, "shape") and len(val.shape) > 0:
-                return int(val.shape[0])
-            try:
-                return len(val)
-            except TypeError:
-                continue
-        return 1
+        seq_lens = getattr(forward_batch, "seq_lens", None)
+        if seq_lens is not None and hasattr(seq_lens, "shape"):
+            return int(seq_lens.shape[0])
+        return int(getattr(forward_batch, "batch_size", 1))
 
     def _decode_step_embeds(
         self, req_ids: list[str], input_ids: torch.Tensor

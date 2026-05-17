@@ -13,6 +13,7 @@ import time
 from collections import deque
 from typing import Any
 
+from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.mem_cache.common import release_kv_cache
 
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
@@ -166,8 +167,6 @@ class HiggsBatchPlanner:
                 if keep:
                     self.decode_manager.running_batch.filter_batch(keep_indices=keep)
                 else:
-                    from sglang.srt.managers.schedule_batch import ScheduleBatch
-
                     self.decode_manager.running_batch = ScheduleBatch(
                         reqs=[], batch_is_full=False
                     )
@@ -207,8 +206,6 @@ class HiggsBatchPlanner:
         if keep_indices:
             running_batch.filter_batch(keep_indices=keep_indices)
         else:
-            from sglang.srt.managers.schedule_batch import ScheduleBatch
-
             self.decode_manager.running_batch = ScheduleBatch(
                 reqs=[], batch_is_full=False
             )

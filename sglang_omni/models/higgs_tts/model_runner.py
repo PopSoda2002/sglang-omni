@@ -33,9 +33,9 @@ class HiggsTTSModelRunner(ModelRunner):
     def prepare_prefill(self, forward_batch, schedule_batch, requests):
         del schedule_batch
         forward_batch.req_ids = [req.request_id for req in requests]
-        input_embeds = self._build_prefill_input_embeds(forward_batch, requests)
-        if input_embeds is not None:
-            forward_batch.input_embeds = input_embeds
+        forward_batch.input_embeds = self._build_prefill_input_embeds(
+            forward_batch, requests
+        )
         return None
 
     def post_prefill(self, result, forward_batch, schedule_batch, requests):
@@ -55,11 +55,8 @@ class HiggsTTSModelRunner(ModelRunner):
         self,
         forward_batch: Any,
         requests: list,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         input_ids = forward_batch.input_ids
-        if not isinstance(input_ids, torch.Tensor):
-            raise TypeError("Higgs prefill expects tensor input_ids")
-
         device = input_ids.device
         embed_tokens = self.model.backbone.model.embed_tokens
         fused_embed = self.model.multimodal_embedding.modality_embedding_0
@@ -72,34 +69,25 @@ class HiggsTTSModelRunner(ModelRunner):
         offset = 0
         for sched_req in requests:
             data = sched_req.data
-            req_len = int(data.req.extend_input_len)
-            end = offset + req_len
-
+            end = offset + int(data.req.extend_input_len)
             codes_rows = data.reference_codes_delayed
-            if codes_rows:
-                full_mask = placeholder_mask[offset:end]
-                n_placeholders = int(full_mask.sum().item())
-                if n_placeholders > 0:
-                    codes = torch.tensor(codes_rows, dtype=torch.long, device=device)
-                    consumed = data.num_ref_codes_consumed
-                    if codes.shape[0] < consumed + n_placeholders:
-                        logger.warning(
-                            "reference_codes_delayed too short for req %s "
-                            "(have %d rows, consumed %d, need %d more); "
-                            "skipping overlay",
-                            sched_req.request_id,
-                            codes.shape[0],
-                            consumed,
-                            n_placeholders,
-                        )
-                    else:
-                        with torch.no_grad():
-                            embed = fused_embed(
-                                codes[consumed : consumed + n_placeholders]
-                            )
-                        mask_idx = full_mask.nonzero(as_tuple=True)[0] + offset
-                        text_embeds[mask_idx] = embed.to(text_embeds.dtype)
-                        data.num_ref_codes_consumed = consumed + n_placeholders
+            if not codes_rows:
+                offset = end
+                continue
+
+            full_mask = placeholder_mask[offset:end]
+            n_placeholders = int(full_mask.sum().item())
+            if n_placeholders == 0:
+                offset = end
+                continue
+
+            codes = torch.tensor(codes_rows, dtype=torch.long, device=device)
+            consumed = data.num_ref_codes_consumed
+            with torch.no_grad():
+                embed = fused_embed(codes[consumed : consumed + n_placeholders])
+            mask_idx = full_mask.nonzero(as_tuple=True)[0] + offset
+            text_embeds[mask_idx] = embed.to(text_embeds.dtype)
+            data.num_ref_codes_consumed = consumed + n_placeholders
             offset = end
 
         return text_embeds
@@ -127,18 +115,10 @@ class HiggsTTSModelRunner(ModelRunner):
             data.generation_done = bool(slot.sampler.generation_done)
             cb0_per_row.append(int(codes_N[0].item()))
 
-        device = (
-            result.logits_output.next_token_logits.device
-            if (
-                result.logits_output is not None
-                and result.logits_output.next_token_logits is not None
-            )
-            else torch.device("cuda")
-        )
         result.next_token_ids = torch.tensor(
             cb0_per_row,
             dtype=torch.long,
-            device=device,
+            device=result.logits_output.next_token_logits.device,
         )
 
 

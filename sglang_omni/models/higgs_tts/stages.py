@@ -29,14 +29,33 @@ from typing import Any
 
 import numpy as np
 import torch
+import torchaudio.functional as F_audio
+from huggingface_hub import snapshot_download
+from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast
 
+from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
+from sglang_omni.models.higgs_tts.higgs_scheduler import HiggsScheduler
+from sglang_omni.models.higgs_tts.model_runner import HiggsTTSModelRunner
 from sglang_omni.models.higgs_tts.payload_types import HiggsTtsState
+from sglang_omni.models.higgs_tts.request_builders import make_higgs_scheduler_adapters
 from sglang_omni.models.higgs_tts.text_tokenizer import HiggsTokenizerAdapter
 from sglang_omni.models.higgs_tts.utils import (
     apply_delay_pattern,
     reverse_delay_pattern,
+    truncate_rope_to_bf16,
 )
+from sglang_omni.preprocessing.audio import AudioMediaIO
+from sglang_omni.preprocessing.base import _is_url
+from sglang_omni.preprocessing.resource_connector import global_http_connection
 from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
+from sglang_omni.scheduling.sglang_backend import (
+    SGLangOutputProcessor,
+    build_sglang_server_args,
+)
+from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +73,10 @@ _CODEC_CACHE: dict[tuple[str, str, str], Any] = {}
 def _resolve_checkpoint(checkpoint: str) -> str:
     if os.path.isdir(checkpoint):
         return checkpoint
-    from huggingface_hub import snapshot_download
-
     return snapshot_download(checkpoint)
 
 
 def _get_or_load_codec(path: str, device: str, dtype: str) -> Any:
-    from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
-
     key = (str(path), str(device), str(dtype))
     cached = _CODEC_CACHE.get(key)
     if cached is not None:
@@ -86,58 +101,36 @@ def _to_codes_TN(raw: Any, num_codebooks: int) -> torch.Tensor | None:
     return t.to(torch.long)
 
 
-def _load_audio_to_24k(reference_audio: Any) -> tuple[np.ndarray, int] | None:
-    """Normalise an ``inputs["reference_audio"]`` entry to a 24 kHz mono float32
-    numpy array. Accepts local path, HTTP/HTTPS URL,
-    ``{audio_path|path|bytes|base64|data}`` dict, or None.
+def _load_audio_to_24k(reference_audio: Any) -> tuple[np.ndarray, int]:
+    """Load ``inputs["reference_audio"]`` as 24 kHz mono float32.
+
+    Accepts local path, HTTP/HTTPS URL, or ``{audio_path|path|bytes|base64|data}`` dict.
     """
-    if reference_audio is None:
-        return None
-
-    from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
-    from sglang_omni.preprocessing.audio import AudioMediaIO
-    from sglang_omni.preprocessing.base import _is_url
-
     io = AudioMediaIO(target_sr=HiggsAudioCodec.SAMPLE_RATE)
 
     def _load_path_or_url(src: str | Path) -> tuple[np.ndarray, int]:
         if isinstance(src, str) and _is_url(src):
-            from sglang_omni.preprocessing.resource_connector import (
-                global_http_connection,
-            )
-
-            client = global_http_connection.get_sync_client()
-            response = client.get(src)
+            response = global_http_connection.get_sync_client().get(src)
             response.raise_for_status()
             audio, sr = io.load_bytes(response.content)
-            return np.asarray(audio, dtype=np.float32), int(sr)
-        audio, sr = io.load_file(Path(src))
+        else:
+            audio, sr = io.load_file(Path(src))
         return np.asarray(audio, dtype=np.float32), int(sr)
 
     if isinstance(reference_audio, (str, Path)):
         return _load_path_or_url(reference_audio)
 
-    if isinstance(reference_audio, dict):
-        if "audio_path" in reference_audio or "path" in reference_audio:
-            path = reference_audio.get("audio_path") or reference_audio.get("path")
-            if not path:
-                raise ValueError("reference_audio dict has an empty audio_path/path")
-            return _load_path_or_url(path)
-        if "bytes" in reference_audio:
-            audio, sr = io.load_bytes(reference_audio["bytes"])
-            return np.asarray(audio, dtype=np.float32), int(sr)
-        if "base64" in reference_audio or "data" in reference_audio:
-            media_type = reference_audio.get("media_type", "audio/wav")
-            data = reference_audio.get("base64") or reference_audio.get("data")
-            if not data:
-                raise ValueError("reference_audio dict has an empty base64/data value")
-            audio, sr = io.load_base64(media_type, data)
-            return np.asarray(audio, dtype=np.float32), int(sr)
-
-    raise TypeError(
-        "reference_audio must be a path, an HTTP/HTTPS URL, a "
-        "{audio_path|path|bytes|base64|data} dict, or None"
-    )
+    if "audio_path" in reference_audio or "path" in reference_audio:
+        return _load_path_or_url(
+            reference_audio.get("audio_path") or reference_audio["path"]
+        )
+    if "bytes" in reference_audio:
+        audio, sr = io.load_bytes(reference_audio["bytes"])
+        return np.asarray(audio, dtype=np.float32), int(sr)
+    media_type = reference_audio.get("media_type", "audio/wav")
+    data = reference_audio.get("base64") or reference_audio["data"]
+    audio, sr = io.load_base64(media_type, data)
+    return np.asarray(audio, dtype=np.float32), int(sr)
 
 
 def create_preprocessing_executor(
@@ -154,11 +147,6 @@ def create_preprocessing_executor(
     codec encoding (and prompt assembly) to the audio_encoder stage —
     only the loaded waveform is shipped forward.
     """
-    from tokenizers import Tokenizer
-    from transformers import PreTrainedTokenizerFast
-
-    from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
-
     checkpoint_dir = _resolve_checkpoint(model_path)
 
     # Higgs ckpt tokenizer_config.json uses transformers v5 metadata and crashes
@@ -200,13 +188,9 @@ def create_preprocessing_executor(
 
         waveform_tensor = None
         if ref_codes_TN is None and inputs.get("reference_audio") is not None:
-            loaded = _load_audio_to_24k(inputs["reference_audio"])
-            assert loaded is not None
-            waveform_np, sample_rate = loaded
+            waveform_np, sample_rate = _load_audio_to_24k(inputs["reference_audio"])
             wav = torch.from_numpy(waveform_np)
             if sample_rate != 24000:
-                import torchaudio.functional as F_audio
-
                 wav = F_audio.resample(wav, sample_rate, 24000)
             if wav.shape[-1] > _MAX_REF_AUDIO_SEC * 24000:
                 raise ValueError(
@@ -273,11 +257,6 @@ def create_audio_encoder_executor(
     No-op when preprocessing already produced ``reference_codes_delayed`` (the
     client-supplied pre-encoded fast path).
     """
-    from tokenizers import Tokenizer
-    from transformers import PreTrainedTokenizerFast
-
-    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
-
     checkpoint_dir = _resolve_checkpoint(model_path)
     raw = Tokenizer.from_file(os.path.join(checkpoint_dir, "tokenizer.json"))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw)
@@ -328,18 +307,6 @@ def create_sglang_tts_engine_executor(
     server_args_overrides: dict[str, Any] | None = None,
 ):
     """sglang-backed AR engine for Higgs TTS."""
-    from sglang_omni.models.higgs_tts.higgs_scheduler import HiggsScheduler
-    from sglang_omni.models.higgs_tts.model_runner import HiggsTTSModelRunner
-    from sglang_omni.models.higgs_tts.request_builders import (
-        make_higgs_scheduler_adapters,
-    )
-    from sglang_omni.models.higgs_tts.utils import truncate_rope_to_bf16
-    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
-    from sglang_omni.scheduling.sglang_backend import (
-        SGLangOutputProcessor,
-        build_sglang_server_args,
-    )
-
     checkpoint_dir = _resolve_checkpoint(model_path)
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
@@ -408,9 +375,6 @@ def create_vocoder_executor(
     max_batch_wait_ms: int = 2,
 ):
     """Decode Higgs delayed codes to a mono 24 kHz waveform."""
-    from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
-    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
-
     del model_path
     codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
     codec = _get_or_load_codec(codec_src, device, dtype)
