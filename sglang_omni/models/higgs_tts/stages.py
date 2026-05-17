@@ -24,13 +24,10 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 import torchaudio.functional as F_audio
-from huggingface_hub import snapshot_download
 from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast
 
@@ -42,12 +39,13 @@ from sglang_omni.models.higgs_tts.request_builders import make_higgs_scheduler_a
 from sglang_omni.models.higgs_tts.text_tokenizer import HiggsTokenizerAdapter
 from sglang_omni.models.higgs_tts.utils import (
     apply_delay_pattern,
+    get_or_load_codec,
+    load_audio_to_24k,
+    resolve_checkpoint,
     reverse_delay_pattern,
+    to_codes_TN,
     truncate_rope_to_bf16,
 )
-from sglang_omni.preprocessing.audio import AudioMediaIO
-from sglang_omni.preprocessing.base import _is_url
-from sglang_omni.preprocessing.resource_connector import global_http_connection
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
 from sglang_omni.scheduling.sglang_backend import (
@@ -66,72 +64,6 @@ DEFAULT_AUDIO_CODEC = "bosonai/higgs-audio-v2-tokenizer"
 # (sampler state machine has no rollback) so reject inputs past chunked_prefill_size.
 _MAX_REF_AUDIO_SEC = 100
 
-# Shared between audio_encoder + vocoder; one codec load saves ~1 GB VRAM.
-_CODEC_CACHE: dict[tuple[str, str, str], Any] = {}
-
-
-def _resolve_checkpoint(checkpoint: str) -> str:
-    if os.path.isdir(checkpoint):
-        return checkpoint
-    return snapshot_download(checkpoint)
-
-
-def _get_or_load_codec(path: str, device: str, dtype: str) -> Any:
-    key = (str(path), str(device), str(dtype))
-    cached = _CODEC_CACHE.get(key)
-    if cached is not None:
-        return cached
-    codec = HiggsAudioCodec.from_pretrained(
-        path, device=device, dtype=getattr(torch, dtype)
-    )
-    _CODEC_CACHE[key] = codec
-    return codec
-
-
-def _to_codes_TN(raw: Any, num_codebooks: int) -> torch.Tensor | None:
-    if raw is None:
-        return None
-    t = raw if isinstance(raw, torch.Tensor) else torch.tensor(raw)
-    if t.numel() == 0:
-        return None
-    if t.ndim != 2 or t.shape[1] != num_codebooks:
-        raise ValueError(
-            f"reference_codes must have shape [T, {num_codebooks}], got {tuple(t.shape)}"
-        )
-    return t.to(torch.long)
-
-
-def _load_audio_to_24k(reference_audio: Any) -> tuple[np.ndarray, int]:
-    """Load ``inputs["reference_audio"]`` as 24 kHz mono float32.
-
-    Accepts local path, HTTP/HTTPS URL, or ``{audio_path|path|bytes|base64|data}`` dict.
-    """
-    io = AudioMediaIO(target_sr=HiggsAudioCodec.SAMPLE_RATE)
-
-    def _load_path_or_url(src: str | Path) -> tuple[np.ndarray, int]:
-        if isinstance(src, str) and _is_url(src):
-            response = global_http_connection.get_sync_client().get(src)
-            response.raise_for_status()
-            audio, sr = io.load_bytes(response.content)
-        else:
-            audio, sr = io.load_file(Path(src))
-        return np.asarray(audio, dtype=np.float32), int(sr)
-
-    if isinstance(reference_audio, (str, Path)):
-        return _load_path_or_url(reference_audio)
-
-    if "audio_path" in reference_audio or "path" in reference_audio:
-        return _load_path_or_url(
-            reference_audio.get("audio_path") or reference_audio["path"]
-        )
-    if "bytes" in reference_audio:
-        audio, sr = io.load_bytes(reference_audio["bytes"])
-        return np.asarray(audio, dtype=np.float32), int(sr)
-    media_type = reference_audio.get("media_type", "audio/wav")
-    data = reference_audio.get("base64") or reference_audio["data"]
-    audio, sr = io.load_base64(media_type, data)
-    return np.asarray(audio, dtype=np.float32), int(sr)
-
 
 def create_preprocessing_executor(
     model_path: str,
@@ -147,7 +79,7 @@ def create_preprocessing_executor(
     codec encoding (and prompt assembly) to the audio_encoder stage —
     only the loaded waveform is shipped forward.
     """
-    checkpoint_dir = _resolve_checkpoint(model_path)
+    checkpoint_dir = resolve_checkpoint(model_path)
 
     # Higgs ckpt tokenizer_config.json uses transformers v5 metadata and crashes
     # transformers<5's from_pretrained; load tokenizer.json directly to avoid it.
@@ -178,7 +110,7 @@ def create_preprocessing_executor(
 
         text = inputs.get("input") or inputs.get("text") or ""
         reference_text = inputs.get("reference_text") or None
-        ref_codes_TN = _to_codes_TN(inputs.get("reference_codes"), num_codebooks)
+        ref_codes_TN = to_codes_TN(inputs.get("reference_codes"), num_codebooks)
         if ref_codes_TN is not None and ref_codes_TN.shape[0] > _MAX_REF_AUDIO_SEC * 75:
             raise ValueError(
                 f"reference_codes is too long ({ref_codes_TN.shape[0]} frames); "
@@ -188,7 +120,7 @@ def create_preprocessing_executor(
 
         waveform_tensor = None
         if ref_codes_TN is None and inputs.get("reference_audio") is not None:
-            waveform_np, sample_rate = _load_audio_to_24k(inputs["reference_audio"])
+            waveform_np, sample_rate = load_audio_to_24k(inputs["reference_audio"])
             wav = torch.from_numpy(waveform_np)
             if sample_rate != 24000:
                 wav = F_audio.resample(wav, sample_rate, 24000)
@@ -257,13 +189,13 @@ def create_audio_encoder_executor(
     No-op when preprocessing already produced ``reference_codes_delayed`` (the
     client-supplied pre-encoded fast path).
     """
-    checkpoint_dir = _resolve_checkpoint(model_path)
+    checkpoint_dir = resolve_checkpoint(model_path)
     raw = Tokenizer.from_file(os.path.join(checkpoint_dir, "tokenizer.json"))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw)
     adapter = HiggsTokenizerAdapter(tokenizer)
 
     codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
-    codec = _get_or_load_codec(codec_src, device, dtype)
+    codec = get_or_load_codec(codec_src, device, dtype)
 
     def _encode(payload: StagePayload) -> StagePayload:
         state = HiggsTtsState.from_dict(payload.data)
@@ -307,7 +239,7 @@ def create_sglang_tts_engine_executor(
     server_args_overrides: dict[str, Any] | None = None,
 ):
     """sglang-backed AR engine for Higgs TTS."""
-    checkpoint_dir = _resolve_checkpoint(model_path)
+    checkpoint_dir = resolve_checkpoint(model_path)
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
     overrides: dict[str, Any] = {
@@ -377,7 +309,7 @@ def create_vocoder_executor(
     """Decode Higgs delayed codes to a mono 24 kHz waveform."""
     del model_path
     codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
-    codec = _get_or_load_codec(codec_src, device, dtype)
+    codec = get_or_load_codec(codec_src, device, dtype)
     sample_rate = HiggsAudioCodec.SAMPLE_RATE
 
     def _vocode(payload: StagePayload) -> StagePayload:
