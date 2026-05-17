@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Higgs multi-codebook delay pattern.
+"""Small utilities shared across the Higgs TTS pipeline.
 
-Codebook ``i`` is shifted ``i`` steps relative to codebook 0. Positions before
-the data segment are filled with ``<|boc|>``; positions after, with ``<|eoc|>``
-— both live inside the codebook vocab (ids 1024 and 1025 for the default 1026
-vocab).
+- :func:`apply_delay_pattern` / :func:`reverse_delay_pattern` — multi-codebook
+  delay shift used by preprocessing + audio_encoder + vocoder. Codebook ``c``
+  is delayed by ``c`` steps; positions before the data segment are filled with
+  :data:`BOC_ID`, positions after with :data:`EOC_ID`. Both live inside the
+  codebook vocab (ids 1024 / 1025 for the default 1026 vocab).
+- :func:`truncate_rope_to_bf16` — bf16-truncate sglang's fp32 RoPE cache to
+  match Higgs's bf16 training-time RoPE; otherwise the fp32 frequencies drift
+  logits at serving time.
 """
 
 from __future__ import annotations
@@ -12,7 +16,6 @@ from __future__ import annotations
 import torch
 
 # Codec-vocab specials (inside the [N*V] codebook space, NOT the text vocab).
-# Match the Higgs default: vocab_size=1026, last two entries are <|boc|>/<|eoc|>.
 BOC_ID = 1024
 EOC_ID = 1025
 
@@ -44,19 +47,9 @@ def apply_delay_pattern(codes_TN: torch.Tensor) -> torch.Tensor:
 def reverse_delay_pattern(delayed_LN: torch.Tensor) -> torch.Tensor:
     """Undo :func:`apply_delay_pattern`.
 
-    Given a delayed sequence of shape ``[L, N]`` (where ``L >= N - 1`` so
-    the data segment has at least one row), pull codebook ``c`` back by
-    ``c`` steps and return the ``[L - (N - 1), N]`` data window. The BOC
-    prefix (first ``c`` rows of codebook ``c``) and the EOC tail (rows
-    past the data region) are dropped.
-
-    Args:
-        delayed_LN: Delayed tokens from :func:`apply_delay_pattern` or
-            directly from the AR decoder, shape ``[L, N]``.
-
-    Returns:
-        Raw codes of shape ``[L - (N - 1), N]``. Rows with ``L < N - 1``
-        can't be reconstructed — the function raises ``ValueError``.
+    Given a delayed sequence of shape ``[L, N]`` (where ``L >= N - 1``),
+    pull codebook ``c`` back by ``c`` steps and return the
+    ``[L - (N - 1), N]`` data window.
     """
     if delayed_LN.ndim != 2:
         raise ValueError(
@@ -75,4 +68,21 @@ def reverse_delay_pattern(delayed_LN: torch.Tensor) -> torch.Tensor:
     return out
 
 
-__all__ = ["BOC_ID", "EOC_ID", "apply_delay_pattern", "reverse_delay_pattern"]
+def truncate_rope_to_bf16(model: torch.nn.Module) -> None:
+    """Truncate sglang's fp32 ``cos_sin_cache`` to bf16 precision in-place
+    (stored as fp32) to match Higgs's bf16 training-time RoPE.
+    """
+    for module in model.modules():
+        if hasattr(module, "cos_sin_cache"):
+            module.cos_sin_cache.data = module.cos_sin_cache.data.to(torch.bfloat16).to(
+                torch.float32
+            )
+
+
+__all__ = [
+    "BOC_ID",
+    "EOC_ID",
+    "apply_delay_pattern",
+    "reverse_delay_pattern",
+    "truncate_rope_to_bf16",
+]

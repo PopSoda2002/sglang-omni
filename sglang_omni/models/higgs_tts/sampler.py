@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import torch
 
-from sglang_omni.models.higgs_tts.delay_pattern import BOC_ID, EOC_ID
+from sglang_omni.models.higgs_tts.utils import BOC_ID, EOC_ID
 
 # Signal returned by ``step`` after ``generation_done`` is set. A sentinel
 # ``-1`` per codebook tells the engine layer this request has terminated.

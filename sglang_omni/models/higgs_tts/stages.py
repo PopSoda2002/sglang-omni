@@ -30,12 +30,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from sglang_omni.models.higgs_tts.delay_pattern import (
+from sglang_omni.models.higgs_tts.payload_types import HiggsTtsState
+from sglang_omni.models.higgs_tts.text_tokenizer import HiggsTokenizerAdapter
+from sglang_omni.models.higgs_tts.utils import (
     apply_delay_pattern,
     reverse_delay_pattern,
 )
-from sglang_omni.models.higgs_tts.payload_types import HiggsTtsState
-from sglang_omni.models.higgs_tts.text_tokenizer import HiggsTokenizerAdapter
 from sglang_omni.proto import StagePayload
 
 logger = logging.getLogger(__name__)
@@ -337,12 +337,12 @@ def create_sglang_tts_engine_executor(
     server_args_overrides: dict[str, Any] | None = None,
 ):
     """sglang-backed AR engine for Higgs TTS."""
-    from sglang_omni.models.higgs_tts.bootstrap import truncate_rope_to_bf16
     from sglang_omni.models.higgs_tts.higgs_scheduler import HiggsScheduler
     from sglang_omni.models.higgs_tts.model_runner import HiggsTTSModelRunner
     from sglang_omni.models.higgs_tts.request_builders import (
         make_higgs_scheduler_adapters,
     )
+    from sglang_omni.models.higgs_tts.utils import truncate_rope_to_bf16
     from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
     from sglang_omni.scheduling.sglang_backend import (
         SGLangOutputProcessor,
