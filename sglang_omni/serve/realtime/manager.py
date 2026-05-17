@@ -1,11 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""Lifecycle manager for active Realtime sessions.
-
-Owns the in-process ``session_id → RealtimeSession`` map. The FastAPI
-WebSocket handler creates a session via ``open()`` and removes it via
-``close()`` on disconnect.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -35,14 +27,9 @@ class RealtimeSessionManager:
         return session
 
     async def close(self, session_id: str) -> None:
-        session = self.sessions.pop(session_id, None)
-        if session is None:
-            return
-        # Always run teardown so GPU inference + asyncio tasks don't
-        # leak on unexpected disconnect. Without this, every dropped
-        # WebSocket left an active completion_stream + drainer task
-        # running until process exit.
+        session = self.sessions[session_id]
         await session.teardown()
+        del self.sessions[session_id]
         logger.info("Realtime session closed: %s", session_id)
 
     def active_sessions(self) -> list[str]:

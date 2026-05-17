@@ -101,13 +101,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Model name for /v1/models (default: pipeline name)",
     )
-    # Note (Chenyang): Add for V1.
     parser.add_argument(
         "--enable-realtime",
         action="store_true",
         help="Mount the WebSocket /v1/realtime endpoint (v1 only).",
     )
-    # Note (Chenyang): Add for V1.
 
     return parser.parse_args()
 

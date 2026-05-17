@@ -109,12 +109,6 @@ class StreamingVAD:
         return float(prob)
 
     def reset(self) -> None:
-        # samples_consumed is buffer-relative — it indexes bytes within
-        # the current audio_buffer, not session wall-clock time. After
-        # auto-commit drops the buffer, both this counter and the last
-        # speech marker must restart from zero or the next utterance's
-        # slice bounds will overshoot the now-empty buffer and silently
-        # drop audio.
         self.leftover_pcm.clear()
         self.samples_consumed = 0
         self.is_speech = False

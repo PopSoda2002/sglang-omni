@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -14,13 +13,9 @@ from starlette.websockets import WebSocketState
 from sglang_omni.client import Client, GenerateRequest, Message, SamplingParams
 from sglang_omni.serve.realtime.audio_buffer import RealtimeAudioBuffer
 from sglang_omni.serve.realtime.events import (
-    SUPPORTED_CLIENT_EVENT_TYPES,
-    ConversationItemCreate,
     InputAudioBufferAppend,
     InputAudioBufferClear,
-    InputAudioBufferCommit,
     ResponseCancel,
-    ResponseCreate,
     SessionObject,
     SessionUpdate,
     make_event,
@@ -33,27 +28,20 @@ from sglang_omni.serve.realtime.vad import (
     offsets_to_ms,
 )
 
-# note (huapeng): Starlette's receive() returns ASGI messages directly; we
-# handle disconnects in-band instead of catching WebSocketDisconnect from
-# receive_text().
 
+DEFAULT_INSTRUCTIONS = "You are a helpful realtime voice assistant. Respond conversationally."
 
-logger = logging.getLogger(__name__)
-
-
-DEFAULT_INSTRUCTIONS = (
-    "You are a realtime speech-to-text engine. Transcribe the user's "
-    "spoken audio verbatim into the same language they spoke. Output "
-    "ONLY the transcript — no descriptions, no refusals, no explanations."
+# Hardcoded — transcription must be verbatim regardless of session instructions.
+_TRANSCRIPTION_PROMPT = (
+    "You are a speech-to-text engine. Transcribe the user's spoken audio "
+    "verbatim into the same language they spoke. Output ONLY the transcript "
+    "— no descriptions, no refusals, no explanations."
 )
 
 HANDLERS: dict[type, str] = {
     SessionUpdate: "handle_session_update",
     InputAudioBufferAppend: "handle_audio_append",
-    InputAudioBufferCommit: "handle_audio_commit",
     InputAudioBufferClear: "handle_audio_clear",
-    ConversationItemCreate: "handle_item_create",
-    ResponseCreate: "handle_response_create",
     ResponseCancel: "handle_response_cancel",
 }
 
@@ -62,26 +50,24 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-def user_audio_item(item_id: str) -> dict[str, Any]:
-    return {
-        "id": item_id,
-        "object": "realtime.item",
-        "type": "message",
-        "role": "user",
-        "content": [{"type": "input_audio", "transcript": None}],
-    }
-
-
 @dataclass
 class ConversationItem:
-    item_id: str
-    role: str
-    text: str = ""
-    audio_transcript: str = ""
+    role: str  # "user" | "assistant"
+    text: str
 
 
 class RealtimeSession:
-    """Owns one WebSocket and one OpenAI-Realtime conversation."""
+    """Owns one WebSocket and one OpenAI-Realtime audio-in / text-out session.
+
+    Per turn (VAD ``speech_stopped`` → auto-commit):
+      1. ``run_response`` consumes the audio + prior conversation, streams
+         ``response.*`` events to the client. User sees their reply fast.
+      2. ``run_transcription`` re-consumes the audio with a verbatim-transcribe
+         prompt, streams ``conversation.item.input_audio_transcription.*`` for
+         history/UI/log.
+      3. Both transcript (user) and response (assistant) are appended to
+         ``self.conversation`` so the next turn has full text context.
+    """
 
     def __init__(
         self,
@@ -102,42 +88,33 @@ class RealtimeSession:
             modalities=["text"],
             instructions=DEFAULT_INSTRUCTIONS,
             input_audio_format="pcm16",
-            output_audio_format="pcm16",
-            turn_detection=None,
         )
 
         self.audio_buffer = RealtimeAudioBuffer(source_sr=16000, target_sr=16000)
+        # (role, text) records — fed back as message history on the next turn.
         self.conversation: list[ConversationItem] = []
         self.closed = False
 
-        self.active_response_id: str | None = None
-        self.active_response_request_id: str | None = None
-        self.active_response_task: asyncio.Task | None = None
-        self.active_transcription_request_id: str | None = None
-        self.active_transcription_task: asyncio.Task | None = None
-        # note (huapeng): VAD may emit multiple speech_stopped events while the
-        # engine is still busy on an earlier utterance, so serialize them.
-        self.transcription_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self.active_request_id: str | None = None
+        self.active_task: asyncio.Task | None = None
+        # VAD may emit speech_stopped while engine is still busy on an
+        # earlier utterance — serialize via FIFO.
+        self.response_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self.queue_drainer: asyncio.Task | None = None
 
-        self.vad: StreamingVAD | None = None
-        # note (huapeng): This is the session-wall-clock sample offset of
-        # buffer byte 0. It advances on commit so speech timestamps remain
-        # wall-clock-correct after dropping the buffer.
+        # VAD is created once with default config; session.update doesn't
+        # touch it. Reconnect to change VAD params.
+        self.vad = StreamingVAD(VADConfig())
+        # Session-wall-clock sample offset of buffer byte 0; advances on
+        # commit so speech timestamps stay correct after a buffer drop.
         self.buffer_origin_samples = 0
         self.utterance_start_byte: int | None = None
-        # note (huapeng): speech_started.item_id predicts the eventual
-        # committed item_id so clients can correlate a live VAD segment to its
-        # transcript. Clear it when the buffer drops so the next utterance gets
-        # a fresh id.
+        # speech_started.item_id predicts the eventual committed id so
+        # clients can align live VAD events to the transcript.
         self.utterance_item_id: str | None = None
 
     async def run(self) -> None:
-        """Drive the WebSocket loop.
-
-        Uses raw ASGI ``receive()`` so a disconnect arrives in-band as
-        ``"websocket.disconnect"`` rather than as a raised exception.
-        """
+        """Drive the WebSocket loop; ``websocket.disconnect`` arrives in-band."""
         await self.send(
             make_event(
                 "session.created",
@@ -151,84 +128,25 @@ class RealtimeSession:
                 break
             if message["type"] != "websocket.receive":
                 continue
-            raw = message.get("text")
-            if raw is None:
-                continue
+            raw = message["text"]
             payload = json.loads(raw)
-            if not isinstance(payload, dict):
-                await self.send_error(
-                    "invalid_request_error",
-                    "invalid_message",
-                    "Top-level payload must be a JSON object",
-                )
-                continue
+            assert isinstance(payload, dict), "Top-level payload must be a JSON object"
             await self.dispatch(payload)
 
     async def dispatch(self, payload: dict[str, Any]) -> None:
-        event_type = payload.get("type")
-        if event_type not in SUPPORTED_CLIENT_EVENT_TYPES:
-            await self.send_error(
-                "invalid_request_error",
-                "unknown_event",
-                f"Event type {event_type!r} is not supported",
-            )
-            return
         event = parse_client_event(payload)
-        if event is None:
-            return
-        method_name = HANDLERS.get(type(event))
-        if method_name is not None:
-            await getattr(self, method_name)(event)
+        assert event is not None, f"Unsupported event type: {payload.get('type')!r}"
+        method_name = HANDLERS[type(event)]
+        await getattr(self, method_name)(event)
 
     async def handle_session_update(self, event: SessionUpdate) -> None:
-        # note (huapeng): Build a candidate first so rejected updates do not
-        # leak into live session state.
+        # Validate a candidate first so a rejected update never lands in live state.
         update = event.session.model_dump(exclude_none=True, exclude_unset=True)
-        merged = self.session_object.model_dump() | update
-        candidate = SessionObject.model_validate(merged)
-
-        if candidate.input_audio_format != "pcm16":
-            await self.send_error(
-                "invalid_request_error",
-                "unsupported_audio_format",
-                f"input_audio_format={candidate.input_audio_format!r} "
-                "(only pcm16 is supported)",
-            )
-            return
-        if "audio" in (candidate.modalities or []):
-            await self.send_error(
-                "invalid_request_error",
-                "unsupported_modality",
-                "modalities=['audio'] is not yet supported (text-out only)",
-            )
-            return
-        td = candidate.turn_detection
-        if td is not None and td.type == "semantic_vad":
-            await self.send_error(
-                "invalid_request_error",
-                "unsupported_turn_detection",
-                "turn_detection.type='semantic_vad' is not yet implemented",
-            )
-            return
-
+        candidate = SessionObject.model_validate(
+            self.session_object.model_dump() | update
+        )
+        assert candidate.input_audio_format == "pcm16", "Only pcm16 is supported"
         self.session_object = candidate
-        if td is None or td.type in (None, "none"):
-            self.vad = None
-        elif td.type == "server_vad":
-            cfg_kwargs: dict[str, Any] = {}
-            if td.threshold is not None:
-                cfg_kwargs["threshold"] = float(td.threshold)
-            if td.prefix_padding_ms is not None:
-                cfg_kwargs["prefix_padding_ms"] = int(td.prefix_padding_ms)
-            if td.silence_duration_ms is not None:
-                cfg_kwargs["silence_duration_ms"] = int(td.silence_duration_ms)
-            self.vad = StreamingVAD(VADConfig(**cfg_kwargs))
-            logger.info(
-                "Realtime session %s: server_vad enabled (threshold=%s)",
-                self.session_id,
-                cfg_kwargs.get("threshold", "default"),
-            )
-
         await self.send(
             make_event(
                 "session.updated",
@@ -237,18 +155,7 @@ class RealtimeSession:
         )
 
     async def handle_audio_append(self, event: InputAudioBufferAppend) -> None:
-        decoded_len, err = self.audio_buffer.append_b64(event.audio)
-        if err == "overflow":
-            await self.send_error(
-                "invalid_request_error",
-                "input_audio_buffer_overflow",
-                f"audio buffer would exceed cap of {self.audio_buffer.max_bytes} bytes",
-            )
-            return
-
-        if self.vad is None or decoded_len == 0:
-            return
-
+        decoded_len = self.audio_buffer.append_b64(event.audio)
         new_bytes = self.audio_buffer.tail(decoded_len)
         emits = await asyncio.to_thread(self.vad.process, new_bytes)
         for emit in emits:
@@ -257,7 +164,7 @@ class RealtimeSession:
     async def handle_vad_emit(self, emit: Any) -> None:
         timestamp_ms = offsets_to_ms(self.buffer_origin_samples + emit.sample_offset)
         if emit.event_type == VADEvent.SPEECH_STARTED:
-            # note (huapeng): Single-channel PCM16 has 2 bytes/sample.
+            # PCM16 mono: 2 bytes/sample.
             vad_byte = max(0, emit.sample_offset * 2)
             self.utterance_start_byte = min(vad_byte, self.audio_buffer.num_bytes)
             self.utterance_item_id = new_id("item")
@@ -279,53 +186,11 @@ class RealtimeSession:
             await self.auto_commit_utterance(emit.sample_offset)
 
     def drop_buffer_and_reset_vad(self) -> None:
-        """Clear the audio buffer and reset VAD/utterance bookkeeping.
-
-        Used by both auto-commit and manual commit so the next utterance
-        always starts from a clean state.
-        """
         self.buffer_origin_samples += self.audio_buffer.num_samples
         self.audio_buffer.clear()
         self.utterance_start_byte = None
         self.utterance_item_id = None
-        if self.vad is not None:
-            self.vad.reset()
-
-    async def commit_user_audio_item(
-        self, payload: str, *, item_id: str | None = None
-    ) -> None:
-        """Send committed → item.created → enqueue for transcription.
-
-        Shared by manual ``input_audio_buffer.commit`` and VAD-driven
-        auto-commit. Manual commits go through the same FIFO so they
-        serialize cleanly against any in-flight VAD utterance.
-
-        ``item_id`` is the predicted id from ``speech_started`` when VAD
-        drove the commit; falls back to a fresh id for manual commits
-        that never saw a speech_started event.
-        """
-        if item_id is None:
-            item_id = new_id("item")
-        previous = self.previous_item_id
-        await self.send(
-            make_event(
-                "input_audio_buffer.committed",
-                previous_item_id=previous,
-                item_id=item_id,
-            )
-        )
-        await self.send(
-            make_event(
-                "conversation.item.created",
-                previous_item_id=previous,
-                item=user_audio_item(item_id),
-            )
-        )
-        self.conversation.append(ConversationItem(item_id=item_id, role="user"))
-
-        await self.transcription_queue.put((item_id, payload))
-        if self.queue_drainer is None or self.queue_drainer.done():
-            self.queue_drainer = asyncio.create_task(self.drain_queue())
+        self.vad.reset()
 
     async def auto_commit_utterance(self, end_sample_offset: int) -> None:
         if self.audio_buffer.is_empty():
@@ -339,165 +204,142 @@ class RealtimeSession:
         )
         if payload is None:
             return
-        # note (huapeng): Capture before reset because drop_buffer_and_reset_vad
-        # clears utterance_item_id for the next utterance.
-        item_id = self.utterance_item_id
-        # note (huapeng): Drop committed speech plus the silence tail and
-        # advance the origin so future VAD timestamps stay wall-clock-correct.
+        item_id = self.utterance_item_id or new_id("item")
         self.drop_buffer_and_reset_vad()
-        await self.commit_user_audio_item(payload, item_id=item_id)
+
+        await self.send(
+            make_event("input_audio_buffer.committed", item_id=item_id)
+        )
+        await self.response_queue.put((item_id, payload))
+        if self.queue_drainer is None or self.queue_drainer.done():
+            self.queue_drainer = asyncio.create_task(self.drain_queue())
 
     async def handle_audio_clear(self, event: InputAudioBufferClear) -> None:
         self.drop_buffer_and_reset_vad()
         await self.send(make_event("input_audio_buffer.cleared"))
 
-    async def handle_audio_commit(self, event: InputAudioBufferCommit) -> None:
-        if self.audio_buffer.is_empty():
-            await self.send_error(
-                "invalid_request_error",
-                "input_audio_buffer_commit_empty",
-                "No audio in buffer to commit",
-            )
-            return
-        payload = self.audio_buffer.to_wav_data_uri()
-        # note (huapeng): Reuse a VAD-predicted item_id when present; manual
-        # commits without speech_started get a fresh id downstream.
-        item_id = self.utterance_item_id
-        self.drop_buffer_and_reset_vad()
-        if payload is None:
-            await self.send_error(
-                "invalid_request_error",
-                "input_audio_buffer_commit_empty",
-                "Audio buffer became empty before commit",
-            )
-            return
-        await self.commit_user_audio_item(payload, item_id=item_id)
-
-    async def handle_item_create(self, event: ConversationItemCreate) -> None:
-        item = event.item
-        if item.type != "message":
-            await self.send_error(
-                "invalid_request_error",
-                "unsupported_item_type",
-                f"item.type={item.type!r} not supported",
-            )
-            return
-
-        # note (huapeng): Audio attachments belong on input_audio_buffer.*;
-        # this path is text-only.
-        if any(c.type == "input_audio" for c in (item.content or [])):
-            await self.send_error(
-                "invalid_request_error",
-                "audio_content_not_supported",
-                "conversation.item.create does not accept input_audio; use "
-                "input_audio_buffer.append/.commit instead",
-            )
-            return
-        text_parts = [
-            c.text
-            for c in (item.content or [])
-            if c.type in ("input_text", "text") and c.text
-        ]
-        item_id = item.id or new_id("item")
-        text = "\n".join(text_parts)
-        self.conversation.append(
-            ConversationItem(
-                item_id=item_id,
-                role=item.role or "user",
-                text=text,
-            )
-        )
-
-        await self.send(
-            make_event(
-                "conversation.item.created",
-                previous_item_id=event.previous_item_id,
-                item={
-                    "id": item_id,
-                    "object": "realtime.item",
-                    "type": "message",
-                    "role": item.role or "user",
-                    "content": [{"type": "input_text", "text": text}] if text else [],
-                },
-            )
-        )
-
-    async def handle_response_create(self, event: ResponseCreate) -> None:
-        if (
-            self.active_response_task is not None
-            and not self.active_response_task.done()
-        ):
-            await self.send_error(
-                "invalid_request_error",
-                "response_in_progress",
-                "A response is already in progress; wait for it to complete "
-                "before sending response.create",
-            )
-            return
-
-        modalities = (
-            event.response.modalities
-            if event.response and event.response.modalities
-            else self.session_object.modalities
-        )
-        if "audio" in (modalities or []):
-            await self.send_error(
-                "invalid_request_error",
-                "unsupported_modality",
-                "audio output is not yet implemented",
-            )
-            return
-
-        self.active_response_task = asyncio.create_task(self.run_text_response(event))
-
     async def handle_response_cancel(self, event: ResponseCancel) -> None:
-        if self.active_response_id is None:
+        if self.active_task is None or self.active_task.done():
             return
-        if self.active_response_task is None or self.active_response_task.done():
-            return
-        if self.active_response_request_id is not None:
-            await self.client.abort(self.active_response_request_id)
-        self.active_response_task.cancel()
+        if self.active_request_id is not None:
+            await self.client.abort(self.active_request_id)
+        self.active_task.cancel()
 
     async def drain_queue(self) -> None:
-        """Pop utterances and run them serially through ``run_transcription``.
-
-        ``asyncio.gather(..., return_exceptions=True)`` collects the inner
-        task's exception or cancellation so one failing utterance does not kill
-        the drainer.
-        """
         while not self.closed:
-            item_id, payload = await self.transcription_queue.get()
-            if (
-                self.active_transcription_task is not None
-                and not self.active_transcription_task.done()
-            ):
-                await asyncio.gather(
-                    self.active_transcription_task,
-                    return_exceptions=True,
-                )
-            self.active_transcription_task = asyncio.create_task(
-                self.run_transcription(item_id, payload)
-            )
-            await asyncio.gather(
-                self.active_transcription_task,
-                return_exceptions=True,
-            )
-            self.active_transcription_task = None
+            item_id, payload = await self.response_queue.get()
+            self.active_task = asyncio.create_task(self.run_turn(item_id, payload))
+            await asyncio.gather(self.active_task, return_exceptions=True)
+            self.active_task = None
 
-    async def run_transcription(self, item_id: str, audio_payload: str) -> None:
+    async def run_turn(self, item_id: str, audio_payload: str) -> None:
+        """Pass 1: response (user-facing, streams fast).
+        Pass 2: transcription (background, fills history).
+        """
+        response_text = await self.run_response(audio_payload)
+        transcript = await self.run_transcription(item_id, audio_payload)
+        # Append in chronological order: user spoke first, assistant replied.
+        if transcript:
+            self.conversation.append(ConversationItem(role="user", text=transcript))
+        if response_text:
+            self.conversation.append(
+                ConversationItem(role="assistant", text=response_text)
+            )
+
+    async def run_response(self, audio_payload: str) -> str:
+        """Emit response.created → response.text.delta × N → text.done → done."""
+        response_id = new_id("resp")
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
-        self.active_transcription_request_id = request_id
+        self.active_request_id = request_id
 
+        try:
+            await self.send(
+                make_event(
+                    "response.created",
+                    response={
+                        "id": response_id,
+                        "object": "realtime.response",
+                        "status": "in_progress",
+                        "output": [],
+                    },
+                )
+            )
+
+            resp_item_id = new_id("item")
+            text_acc: list[str] = []
+            finish_reason = "stop"
+            usage: dict[str, Any] | None = None
+            async for chunk in self.client.completion_stream(
+                self.build_response_request(audio_payload),
+                request_id=request_id,
+            ):
+                if chunk.modality == "text" and chunk.text:
+                    text_acc.append(chunk.text)
+                    await self.send(
+                        make_event(
+                            "response.text.delta",
+                            response_id=response_id,
+                            item_id=resp_item_id,
+                            output_index=0,
+                            content_index=0,
+                            delta=chunk.text,
+                        )
+                    )
+                if chunk.finish_reason is not None:
+                    finish_reason = chunk.finish_reason
+                    usage = (
+                        dataclasses.asdict(chunk.usage)
+                        if chunk.usage is not None
+                        else None
+                    )
+                    break
+
+            response_text = "".join(text_acc)
+            await self.send(
+                make_event(
+                    "response.text.done",
+                    response_id=response_id,
+                    item_id=resp_item_id,
+                    output_index=0,
+                    content_index=0,
+                    text=response_text,
+                )
+            )
+            await self.send(
+                make_event(
+                    "response.done",
+                    response={
+                        "id": response_id,
+                        "object": "realtime.response",
+                        "status": "completed",
+                        "status_details": {"reason": finish_reason},
+                        "output": [
+                            {
+                                "id": resp_item_id,
+                                "object": "realtime.item",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": response_text}],
+                            }
+                        ],
+                        "usage": usage,
+                    },
+                )
+            )
+            return response_text
+        finally:
+            self.active_request_id = None
+
+    async def run_transcription(self, item_id: str, audio_payload: str) -> str:
+        request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
+        self.active_request_id = request_id
         try:
             text_acc: list[str] = []
             async for chunk in self.client.completion_stream(
                 self.build_transcription_request(audio_payload),
                 request_id=request_id,
             ):
-                if chunk.modality != "text":
-                    continue
-                if chunk.text:
+                if chunk.modality == "text" and chunk.text:
                     text_acc.append(chunk.text)
                     await self.send(
                         make_event(
@@ -519,107 +361,11 @@ class RealtimeSession:
                     transcript=transcript,
                 )
             )
-            for entry in self.conversation:
-                if entry.item_id == item_id:
-                    entry.audio_transcript = transcript
-                    break
+            return transcript
         finally:
-            self.active_transcription_request_id = None
+            self.active_request_id = None
 
-    async def run_text_response(self, event: ResponseCreate) -> None:
-        """Emit response.created → response.text.delta × N → text.done → done.
-
-        Engine errors and cancellation propagate freely; the drainer's
-        ``asyncio.wait`` contains them.
-        """
-        response_id = new_id("resp")
-        self.active_response_id = response_id
-        request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
-        self.active_response_request_id = request_id
-
-        try:
-            await self.send(
-                make_event(
-                    "response.created",
-                    response={
-                        "id": response_id,
-                        "object": "realtime.response",
-                        "status": "in_progress",
-                        "output": [],
-                    },
-                )
-            )
-
-            item_id = new_id("item")
-            text_acc: list[str] = []
-            finish_reason = "stop"
-            usage: dict[str, Any] | None = None
-            async for chunk in self.client.completion_stream(
-                self.build_text_response_request(event),
-                request_id=request_id,
-            ):
-                if chunk.modality == "text" and chunk.text:
-                    text_acc.append(chunk.text)
-                    await self.send(
-                        make_event(
-                            "response.text.delta",
-                            response_id=response_id,
-                            item_id=item_id,
-                            output_index=0,
-                            content_index=0,
-                            delta=chunk.text,
-                        )
-                    )
-                if chunk.finish_reason is not None:
-                    finish_reason = chunk.finish_reason
-                    usage = (
-                        dataclasses.asdict(chunk.usage)
-                        if chunk.usage is not None
-                        else None
-                    )
-                    break
-
-            transcript = "".join(text_acc)
-            await self.send(
-                make_event(
-                    "response.text.done",
-                    response_id=response_id,
-                    item_id=item_id,
-                    output_index=0,
-                    content_index=0,
-                    text=transcript,
-                )
-            )
-            self.conversation.append(
-                ConversationItem(item_id=item_id, role="assistant", text=transcript)
-            )
-
-            await self.send(
-                make_event(
-                    "response.done",
-                    response={
-                        "id": response_id,
-                        "object": "realtime.response",
-                        "status": "completed",
-                        "status_details": {"reason": finish_reason},
-                        "output": [
-                            {
-                                "id": item_id,
-                                "object": "realtime.item",
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": transcript}],
-                            }
-                        ],
-                        "usage": usage,
-                    },
-                )
-            )
-        finally:
-            self.active_response_request_id = None
-            self.active_response_id = None
-
-    def base_sampling(self) -> SamplingParams:
+    def _sampling(self) -> SamplingParams:
         max_tokens = self.session_object.max_response_output_tokens
         return SamplingParams(
             temperature=self.session_object.temperature,
@@ -627,47 +373,37 @@ class RealtimeSession:
             max_new_tokens=max_tokens if isinstance(max_tokens, int) else None,
         )
 
-    def build_transcription_request(self, audio_payload: str) -> GenerateRequest:
-        # note (huapeng): Defer to the session prompt because instructions may
-        # ask for transcription, translation, or a different audio task.
+    def build_response_request(self, audio_payload: str) -> GenerateRequest:
+        """Response pass: session instructions + conversation history + current audio."""
+        messages: list[Message] = [
+            Message(
+                role="system",
+                content=self.session_object.instructions or DEFAULT_INSTRUCTIONS,
+            )
+        ]
+        for item in self.conversation:
+            messages.append(Message(role=item.role, content=item.text))
         return GenerateRequest(
             model=self.model_name,
-            messages=[
-                Message(
-                    role="system",
-                    content=self.session_object.instructions or DEFAULT_INSTRUCTIONS,
-                ),
-                Message(
-                    role="user",
-                    content="Follow the instructions above for the spoken audio.",
-                ),
-            ],
-            sampling=self.base_sampling(),
+            messages=messages,
+            sampling=self._sampling(),
             stream=True,
             output_modalities=["text"],
             metadata={"audios": [audio_payload]},
         )
 
-    def build_text_response_request(self, event: ResponseCreate) -> GenerateRequest:
-        instructions = self.session_object.instructions or DEFAULT_INSTRUCTIONS
-        if event.response is not None and event.response.instructions:
-            instructions = event.response.instructions
-
-        messages: list[Message] = [Message(role="system", content=instructions)]
-        for item in self.conversation:
-            if item.role == "user":
-                content = item.text or item.audio_transcript
-                if content:
-                    messages.append(Message(role="user", content=content))
-            elif item.role == "assistant" and item.text:
-                messages.append(Message(role="assistant", content=item.text))
-
+    def build_transcription_request(self, audio_payload: str) -> GenerateRequest:
+        """Transcription pass: hardcoded verbatim prompt + current audio only."""
         return GenerateRequest(
             model=self.model_name,
-            messages=messages,
-            sampling=self.base_sampling(),
+            messages=[
+                Message(role="system", content=_TRANSCRIPTION_PROMPT),
+                Message(role="user", content="Transcribe the spoken audio."),
+            ],
+            sampling=self._sampling(),
             stream=True,
             output_modalities=["text"],
+            metadata={"audios": [audio_payload]},
         )
 
     async def send(self, event: dict[str, Any]) -> None:
@@ -679,12 +415,6 @@ class RealtimeSession:
         await self.websocket.send_text(json.dumps(event))
 
     async def send_error(self, type_: str, code: str, message: str) -> None:
-        """Emit an OpenAI-Realtime ``error`` event without closing.
-
-        Used by boundary validation in handlers — invalid client input
-        should produce a structured error a client can react to, not a
-        1006 WebSocket disconnect from an uncaught AssertionError.
-        """
         await self.send(
             make_event(
                 "error",
@@ -692,40 +422,25 @@ class RealtimeSession:
             )
         )
 
-    @property
-    def previous_item_id(self) -> str | None:
-        return self.conversation[-1].item_id if self.conversation else None
+    async def _cancel_and_abort(
+        self, task: asyncio.Task | None, request_id: str | None
+    ) -> None:
+        """Abort engine request, cancel task, absorb result.
+
+        ``asyncio.gather(..., return_exceptions=True)`` is used instead of
+        ``.exception()`` because the latter re-raises ``CancelledError`` on a
+        cancelled task, turning a normal disconnect into a handler exception.
+        """
+        if task is None or task.done():
+            return
+        if request_id is not None:
+            await self.client.abort(request_id)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def teardown(self) -> None:
-        """Cancel in-flight tasks and close the WebSocket.
-
-        Uses ``asyncio.gather(..., return_exceptions=True)`` instead of
-        ``.exception()`` because the latter re-raises ``CancelledError``
-        when called on a cancelled task — turning a routine disconnect
-        into a handler-level exception that aborts manager cleanup.
-        """
         self.closed = True
-        if (
-            self.active_response_task is not None
-            and not self.active_response_task.done()
-        ):
-            if self.active_response_request_id is not None:
-                await self.client.abort(self.active_response_request_id)
-            self.active_response_task.cancel()
-            await asyncio.gather(self.active_response_task, return_exceptions=True)
-
-        if (
-            self.active_transcription_task is not None
-            and not self.active_transcription_task.done()
-        ):
-            if self.active_transcription_request_id is not None:
-                await self.client.abort(self.active_transcription_request_id)
-            self.active_transcription_task.cancel()
-            await asyncio.gather(self.active_transcription_task, return_exceptions=True)
-
-        if self.queue_drainer is not None and not self.queue_drainer.done():
-            self.queue_drainer.cancel()
-            await asyncio.gather(self.queue_drainer, return_exceptions=True)
-
+        await self._cancel_and_abort(self.active_task, self.active_request_id)
+        await self._cancel_and_abort(self.queue_drainer, None)
         if self.websocket.client_state == WebSocketState.CONNECTED:
             await self.websocket.close()

@@ -1,45 +1,35 @@
-# SPDX-License-Identifier: Apache-2.0
 """Pydantic models for the subset of OpenAI Realtime WebSocket events
 we currently implement.
 
 Reference: https://developers.openai.com/api/docs/guides/realtime
-
-Client events parsed: session.update, input_audio_buffer.append /
-.commit / .clear, conversation.item.create (text only), response.create
-(text only), response.cancel.
-
-Unsupported event types are rejected with a structured ``error`` event
-by the session dispatcher; the wire format itself stays
-forward-compatible (Pydantic models permit extra fields).
 """
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# Forward compatibility for future event types.
 class EventBase(BaseModel):
-    """Permissive base: Realtime carries server-version-specific fields
-    we don't always model — allow extras through unchanged."""
-
     model_config = ConfigDict(extra="allow")
 
 
+class TurnDetectionType(str, Enum):
+    """``turn_detection.type`` discriminator. ``str`` mixin keeps wire
+    values as plain strings and lets handlers compare against either
+    the enum member or its literal string."""
+
+    SERVER_VAD = "server_vad"
+    SEMANTIC_VAD = "semantic_vad"
+
 class TurnDetection(EventBase):
-    type: Literal["server_vad", "semantic_vad", "none"] | None = None
+    type: TurnDetectionType = TurnDetectionType.SERVER_VAD
     threshold: float | None = None
     prefix_padding_ms: int | None = None
     silence_duration_ms: int | None = None
-    create_response: bool | None = None
-    interrupt_response: bool | None = None
-
-
-class InputAudioTranscription(EventBase):
-    model: str | None = None
-    language: str | None = None
-    prompt: str | None = None
 
 
 class SessionConfig(EventBase):
@@ -47,13 +37,8 @@ class SessionConfig(EventBase):
 
     modalities: list[str] | None = None
     instructions: str | None = None
-    voice: str | None = None
     input_audio_format: Literal["pcm16", "g711_ulaw", "g711_alaw"] | None = None
-    output_audio_format: Literal["pcm16", "g711_ulaw", "g711_alaw"] | None = None
-    input_audio_transcription: InputAudioTranscription | None = None
     turn_detection: TurnDetection | None = None
-    tools: list[dict[str, Any]] | None = None
-    tool_choice: Any | None = None
     temperature: float | None = None
     max_response_output_tokens: int | str | None = None
 
@@ -64,13 +49,8 @@ class SessionObject(EventBase):
     model: str
     modalities: list[str] = Field(default_factory=lambda: ["text"])
     instructions: str = ""
-    voice: str | None = None
     input_audio_format: str = "pcm16"
-    output_audio_format: str = "pcm16"
-    input_audio_transcription: InputAudioTranscription | None = None
     turn_detection: TurnDetection | None = None
-    tools: list[dict[str, Any]] = Field(default_factory=list)
-    tool_choice: Any = "auto"
     temperature: float = 0.8
     max_response_output_tokens: int | str = "inf"
 
@@ -90,60 +70,12 @@ class InputAudioBufferAppend(ClientEvent):
     audio: str  # base64-encoded raw PCM16 (or g711) per session.input_audio_format
 
 
-class InputAudioBufferCommit(ClientEvent):
-    type: Literal["input_audio_buffer.commit"]
-
-
 class InputAudioBufferClear(ClientEvent):
     type: Literal["input_audio_buffer.clear"]
 
 
-class ConversationItemContent(EventBase):
-    type: Literal["input_text", "input_audio", "text", "item_reference"]
-    text: str | None = None
-    audio: str | None = None  # base64
-    transcript: str | None = None
-    id: str | None = None
-
-
-class ConversationItem(EventBase):
-    id: str | None = None
-    type: Literal["message", "function_call", "function_call_output"] = "message"
-    role: Literal["user", "assistant", "system"] | None = None
-    content: list[ConversationItemContent] | None = None
-    call_id: str | None = None
-    name: str | None = None
-    arguments: str | None = None
-    output: str | None = None
-
-
-class ConversationItemCreate(ClientEvent):
-    type: Literal["conversation.item.create"]
-    previous_item_id: str | None = None
-    item: ConversationItem
-
-
-class ResponseConfig(EventBase):
-    modalities: list[str] | None = None
-    instructions: str | None = None
-    voice: str | None = None
-    output_audio_format: str | None = None
-    tools: list[dict[str, Any]] | None = None
-    tool_choice: Any | None = None
-    temperature: float | None = None
-    max_output_tokens: int | str | None = None
-    conversation: Literal["auto", "none"] | None = None
-    input: list[ConversationItem] | None = None
-
-
-class ResponseCreate(ClientEvent):
-    type: Literal["response.create"]
-    response: ResponseConfig | None = None
-
-
 class ResponseCancel(ClientEvent):
     type: Literal["response.cancel"]
-    response_id: str | None = None
 
 
 def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
@@ -160,15 +92,9 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
 CLIENT_EVENT_TYPES: dict[str, type[ClientEvent]] = {
     "session.update": SessionUpdate,
     "input_audio_buffer.append": InputAudioBufferAppend,
-    "input_audio_buffer.commit": InputAudioBufferCommit,
     "input_audio_buffer.clear": InputAudioBufferClear,
-    "conversation.item.create": ConversationItemCreate,
-    "response.create": ResponseCreate,
     "response.cancel": ResponseCancel,
 }
-
-
-SUPPORTED_CLIENT_EVENT_TYPES = frozenset(CLIENT_EVENT_TYPES.keys())
 
 
 def parse_client_event(raw: dict[str, Any]) -> ClientEvent | None:
