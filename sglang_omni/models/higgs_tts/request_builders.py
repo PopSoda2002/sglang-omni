@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +28,26 @@ class HiggsSGLangRequestData(SGLangARRequestData):
     generation_done: bool = False
 
 
+def _ref_audio_fingerprint(codes: list[list[int]] | None) -> str | None:
+    """Stable hash of the full N-codebook ref-audio sequence.
+
+    Returned as a short hex string used as ``Req.extra_key``. ``None`` for
+    zero-shot (no ref audio) so all zero-shot requests share the radix subtree.
+    Each codec value packs into 2 bytes (range 0..1025) so the hash is
+    sensitive to every codebook, not just cb0.
+    """
+    if not codes:
+        return None
+    buf = bytearray(2 * sum(len(row) for row in codes))
+    i = 0
+    for row in codes:
+        for c in row:
+            buf[i] = c & 0xFF
+            buf[i + 1] = (c >> 8) & 0xFF
+            i += 2
+    return hashlib.blake2b(bytes(buf), digest_size=16).hexdigest()
+
+
 def build_sglang_higgs_request(
     state: HiggsTtsState, *, request_id: str = ""
 ) -> HiggsSGLangRequestData:
@@ -44,12 +65,15 @@ def build_sglang_higgs_request(
     sampling_params = SamplingParams(**sp_kwargs)
 
     # vocab_size = backbone text vocab so cb0 rides sglang's standard sampler path.
+    # extra_key namespaces the radix cache per ref-audio fingerprint so prompts
+    # sharing the -100 placeholder prefix can never cross-contaminate KV.
     req = Req(
         rid=request_id,
         origin_input_text="",
         origin_input_ids=input_ids_list,
         sampling_params=sampling_params,
         vocab_size=151_936,
+        extra_key=_ref_audio_fingerprint(state.reference_codes_delayed),
     )
     # V1's prefill manager probes these attrs; absence triggers AttributeError.
     req._codec_suppress_tokens = None

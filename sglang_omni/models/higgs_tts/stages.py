@@ -249,9 +249,9 @@ def create_sglang_tts_engine_executor(
         "max_running_requests": 16,
         "chunked_prefill_size": 8192,
         "dtype": "bfloat16",
-        # -100 placeholders share the token-id prefix but get different ref-audio
-        # overlays per request; radix cache by token id would cross-contaminate.
-        "disable_radix_cache": True,
+        # Radix cache is namespaced per ref-audio via Req.extra_key (set in
+        # build_sglang_higgs_request); shared -100 placeholder prefixes from
+        # different ref audios can't cross-contaminate the KV tree.
     }
     if server_args_overrides:
         overrides.update(server_args_overrides)
