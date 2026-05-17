@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 # Default open-source audio codec.
 DEFAULT_AUDIO_CODEC = "bosonai/higgs-audio-v2-tokenizer"
 
+# Reference-audio length cap. Codec runs at 75 Hz (24000/320); chunked
+# prefill is unsafe for the multi-codebook prompt (the sampler state
+# machine has no rollback path), so reject inputs that would push the
+# prompt past sglang's ``chunked_prefill_size`` threshold.
+_MAX_REF_AUDIO_SEC = 100
+
 # Shared codec instances between preprocessing and vocoder stages — saves
 # ~1 GB of VRAM + one load pass at server startup.
 _CODEC_CACHE: dict[tuple[str, str, str], Any] = {}
@@ -191,6 +197,12 @@ def create_preprocessing_executor(
         text = inputs.get("input") or inputs.get("text") or ""
         reference_text = inputs.get("reference_text") or None
         ref_codes_TN = _to_codes_TN(inputs.get("reference_codes"), num_codebooks)
+        if ref_codes_TN is not None and ref_codes_TN.shape[0] > _MAX_REF_AUDIO_SEC * 75:
+            raise ValueError(
+                f"reference_codes is too long ({ref_codes_TN.shape[0]} frames); "
+                f"cap at {_MAX_REF_AUDIO_SEC}s of audio "
+                f"(~{_MAX_REF_AUDIO_SEC * 75} frames at 75 Hz)."
+            )
 
         waveform_tensor = None
         if ref_codes_TN is None and inputs.get("reference_audio") is not None:
@@ -202,6 +214,11 @@ def create_preprocessing_executor(
                 import torchaudio.functional as F_audio
 
                 wav = F_audio.resample(wav, sample_rate, 24000)
+            if wav.shape[-1] > _MAX_REF_AUDIO_SEC * 24000:
+                raise ValueError(
+                    f"reference_audio is too long "
+                    f"({wav.shape[-1] / 24000:.1f}s); cap at {_MAX_REF_AUDIO_SEC}s."
+                )
             waveform_tensor = wav.view(1, 1, -1).contiguous().float()
 
         if ref_codes_TN is not None:

@@ -282,7 +282,6 @@ class HiggsTTSModel(nn.Module):
             dtype=torch.float32,
         )
 
-    # Forward ----------------------------------------------------------------
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -360,7 +359,6 @@ class HiggsTTSModel(nn.Module):
             hidden_states=hidden_states_last,
         )
 
-    # -- forward helpers -----------------------------------------------------
     @staticmethod
     def _is_decode_step(forward_batch) -> bool:
         mode = getattr(forward_batch, "forward_mode", None)
