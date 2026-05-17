@@ -22,7 +22,7 @@ from typing import Any
 import torch
 
 from sglang_omni.model_runner.base import ModelRunner
-from sglang_omni.models.higgs_tts.tokenizer import AUDIO_PLACEHOLDER_ID
+from sglang_omni.models.higgs_tts.text_tokenizer import AUDIO_PLACEHOLDER_ID
 
 logger = logging.getLogger(__name__)
 

@@ -35,7 +35,7 @@ from sglang_omni.models.higgs_tts.delay_pattern import (
     reverse_delay_pattern,
 )
 from sglang_omni.models.higgs_tts.payload_types import HiggsTtsState
-from sglang_omni.models.higgs_tts.tokenizer import HiggsTokenizerAdapter
+from sglang_omni.models.higgs_tts.text_tokenizer import HiggsTokenizerAdapter
 from sglang_omni.proto import StagePayload
 
 logger = logging.getLogger(__name__)
