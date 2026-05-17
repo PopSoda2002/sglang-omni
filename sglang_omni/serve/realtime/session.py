@@ -372,7 +372,13 @@ class RealtimeSession:
         )
 
     def build_response_request(self, audio_payload: str) -> GenerateRequest:
-        """Response pass: session instructions + conversation history + current audio."""
+        """Response pass: session instructions + conversation history + current audio.
+
+        A trailing user message anchors the audio as *this turn's* user input.
+        Without it Qwen3-Omni treats audio as background context and ignores it
+        once any prior conversation exists, falling back to greeting on every
+        turn.
+        """
         messages: list[Message] = [
             Message(
                 role="system",
@@ -381,6 +387,12 @@ class RealtimeSession:
         ]
         for item in self.conversation:
             messages.append(Message(role=item.role, content=item.text))
+        messages.append(
+            Message(
+                role="user",
+                content="Listen to the spoken audio above and respond to it.",
+            )
+        )
         return GenerateRequest(
             model=self.model_name,
             messages=messages,

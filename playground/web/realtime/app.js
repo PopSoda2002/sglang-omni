@@ -45,10 +45,13 @@
   let drawRaf = 0;
   let turnCounter = 0;
   // Each turn card is keyed by the audio item_id minted at speech_started /
-  // committed. response.text.delta events have no item_id link to the audio,
-  // so we route them to whichever turn is currently in flight.
+  // committed.
   const turnCards = new Map();           // item_id → DOM node
-  let currentTurnItemId = null;          // most recent committed/speech_started id
+  // response.text.delta events have no item_id link to the audio. Server
+  // serializes turns, so we maintain a FIFO of audio item_ids queued for a
+  // response and bind one to each response.created.
+  const pendingAudioForResponse = [];    // queue of item_ids awaiting response
+  let respondingTurnItemId = null;       // item_id of the response currently streaming
   const TARGET_SR = 16000;
 
   // ─────────────────────  Status helpers  ─────────────────────
@@ -142,7 +145,8 @@
   function clearTurns() {
     turnCards.clear();
     turnCounter = 0;
-    currentTurnItemId = null;
+    pendingAudioForResponse.length = 0;
+    respondingTurnItemId = null;
     transcriptsEl.innerHTML =
       '<p class="empty-state">The wire is quiet. Open it, then speak.</p>';
   }
@@ -314,7 +318,6 @@
         return;
 
       case "input_audio_buffer.speech_started":
-        currentTurnItemId = evt.item_id;
         ensureTurn(evt.item_id);
         setTurnMeta(evt.item_id, `started ${ms(evt.audio_start_ms)}`);
         return;
@@ -324,31 +327,35 @@
         return;
 
       case "input_audio_buffer.committed":
-        currentTurnItemId = evt.item_id;
         ensureTurn(evt.item_id);
         setTurnMeta(evt.item_id, "committed · awaiting reply");
+        // Queue this turn for the next response.created — server processes
+        // commits serially so FIFO is correct.
+        pendingAudioForResponse.push(evt.item_id);
         return;
 
       // ── Pass 1: assistant reply (streams first) ──
       case "response.created":
-        if (currentTurnItemId) {
-          setTurnMeta(currentTurnItemId, "replying");
+        respondingTurnItemId = pendingAudioForResponse.shift() || null;
+        if (respondingTurnItemId) {
+          setTurnMeta(respondingTurnItemId, "replying");
         }
         return;
 
       case "response.text.delta":
-        if (currentTurnItemId) {
-          appendToBody(currentTurnItemId, "assistant-body", evt.delta || "");
+        if (respondingTurnItemId) {
+          appendToBody(respondingTurnItemId, "assistant-body", evt.delta || "");
         }
         return;
 
       case "response.text.done":
-        if (currentTurnItemId) {
-          setTurnMeta(currentTurnItemId, "reply done · transcribing");
+        if (respondingTurnItemId) {
+          setTurnMeta(respondingTurnItemId, "reply done · transcribing");
         }
         return;
 
       case "response.done":
+        respondingTurnItemId = null;
         return;
 
       // ── Pass 2: transcription of what the user said (streams after) ──
