@@ -28,8 +28,9 @@ from sglang_omni.serve.realtime.vad import (
     offsets_to_ms,
 )
 
-
-DEFAULT_INSTRUCTIONS = "You are a helpful realtime voice assistant. Respond conversationally."
+DEFAULT_INSTRUCTIONS = (
+    "You are a helpful realtime voice assistant. Respond conversationally."
+)
 
 # Hardcoded — transcription must be verbatim regardless of session instructions.
 _TRANSCRIPTION_PROMPT = (
@@ -205,9 +206,7 @@ class RealtimeSession:
         item_id = self.utterance_item_id or new_id("item")
         self.drop_buffer_and_reset_vad()
 
-        await self.send(
-            make_event("input_audio_buffer.committed", item_id=item_id)
-        )
+        await self.send(make_event("input_audio_buffer.committed", item_id=item_id))
         await self.response_queue.put((item_id, payload))
         if self.queue_drainer is None or self.queue_drainer.done():
             self.queue_drainer = asyncio.create_task(self.drain_queue())

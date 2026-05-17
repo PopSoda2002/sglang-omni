@@ -160,25 +160,25 @@ async def test_vad_audio_emits_response_then_transcription(
     transcription_completed_idx = types.index(
         "conversation.item.input_audio_transcription.completed"
     )
-    assert response_done_idx < transcription_completed_idx, (
-        f"response.done must precede transcription.completed; got {types}"
-    )
+    assert (
+        response_done_idx < transcription_completed_idx
+    ), f"response.done must precede transcription.completed; got {types}"
 
     # Both passes must produce non-empty text.
     response_done = next(e for e in events if e["type"] == "response.done")
     response_text = response_done["response"]["output"][0]["content"][0]["text"]
-    assert response_text.strip(), (
-        f"expected non-empty response text; got {response_done!r}"
-    )
+    assert (
+        response_text.strip()
+    ), f"expected non-empty response text; got {response_done!r}"
 
     completed = next(
         e
         for e in events
         if e["type"] == "conversation.item.input_audio_transcription.completed"
     )
-    assert completed.get("transcript", "").strip(), (
-        f"expected non-empty transcript; got {completed!r}"
-    )
+    assert completed.get(
+        "transcript", ""
+    ).strip(), f"expected non-empty transcript; got {completed!r}"
 
 
 @pytest.mark.asyncio

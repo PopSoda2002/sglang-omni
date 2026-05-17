@@ -25,6 +25,7 @@ class TurnDetectionType(str, Enum):
     SERVER_VAD = "server_vad"
     SEMANTIC_VAD = "semantic_vad"
 
+
 class TurnDetection(EventBase):
     type: TurnDetectionType = TurnDetectionType.SERVER_VAD
     threshold: float | None = None

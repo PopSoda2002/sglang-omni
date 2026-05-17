@@ -6,10 +6,10 @@ from __future__ import annotations
 import base64
 import io
 import wave
-from typing import Literal
 
 # 60 seconds hard cap for audio buffer.
 DEFAULT_MAX_BUFFER_BYTES = 60 * 16000 * 2
+
 
 class RealtimeAudioBuffer:
     """Append-only buffer of raw little-endian PCM16 bytes."""
