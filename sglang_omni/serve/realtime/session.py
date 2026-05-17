@@ -199,11 +199,9 @@ class RealtimeSession:
         end_byte = min(end_sample_offset * 2, self.audio_buffer.num_bytes)
         if end_byte <= start_byte:
             return
-        payload = self.audio_buffer.slice_to_wav_data_uri(
+        payload = self.audio_buffer.to_sliced_wav_data_uri(
             start_byte=start_byte, end_byte=end_byte
         )
-        if payload is None:
-            return
         item_id = self.utterance_item_id or new_id("item")
         self.drop_buffer_and_reset_vad()
 

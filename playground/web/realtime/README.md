@@ -3,9 +3,10 @@
 ![preview](preview.png)
 
 Editorial-broadsheet single-page client for `/v1/realtime`. Captures
-the microphone, streams PCM16 chunks to the WebSocket, renders
-transcription deltas live with drop caps and a vermilion in-progress
-rule. Vanilla HTML/CSS/JS — no build step.
+the microphone, streams PCM16 chunks to the WebSocket, and renders each
+turn as an editorial card: the assistant's reply (drop caps, vermilion
+in-progress rule) appears first, then the verbatim transcript of what
+you said fills in below. Vanilla HTML/CSS/JS — no build step.
 
 ## Run
 
@@ -28,24 +29,22 @@ rule. Vanilla HTML/CSS/JS — no build step.
    ```
 
 3. **Open** <http://127.0.0.1:8080> in a modern browser. Click
-   **Connect**, then **Start microphone**, then either:
-   - **Manual commit** mode → click **Manual commit** when you finish a
-     sentence;
-   - **Server VAD** mode → just speak; the server detects boundaries
-     and auto-commits.
+   **Open Wire**, then **Begin Transmission**, and start speaking.
+   Server VAD detects when you stop; the engine replies, then
+   transcribes your speech to fill conversation history.
 
 ## What you'll see
 
 | UI panel | Meaning |
 |---|---|
-| **Server URL** | WebSocket endpoint to connect to. |
-| **Turn detection** | Manual (client commits) vs. server VAD (silero auto-commit). |
-| **Instructions** | System prompt sent in `session.update`. |
-| **Transcripts** | Each utterance appears as a card; deltas stream in live, the card turns green on `transcription.completed`. |
-| **Event log** | Raw protocol events both directions. Toggle the checkbox to also include the high-volume `transcription.delta` frames. |
+| **Endpoint** | WebSocket endpoint to connect to. |
+| **Instructions** | System prompt sent in `session.update`. Affects the assistant reply only — transcription always runs verbatim. |
+| **Transcripts** | Each VAD-driven turn appears as a card. The assistant reply streams in first (from `response.text.delta`), then the user transcript fills in below (from `conversation.item.input_audio_transcription.delta`). |
 
 ## Notes
 
+- VAD is always on server-side; there's no manual commit. Just speak,
+  pause, and the server picks up the turn.
 - The page constructs its own `AudioWorklet` inline so there's no build
   step / package.json required.
 - Audio is captured at 16 kHz, converted to PCM16 little-endian, and

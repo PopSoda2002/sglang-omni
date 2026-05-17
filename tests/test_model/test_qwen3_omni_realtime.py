@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Realtime WebSocket integration tests for Qwen3-Omni (Audio → Text).
+"""Realtime WebSocket integration tests for Qwen3-Omni (audio in → response + transcription).
+
+Launches a Qwen3-Omni thinker-only server with ``--enable-realtime`` and drives
+/v1/realtime via the ``websockets`` client. VAD is always on (default config);
+manual commit / response.create / conversation.item.create are gone. Each VAD
+auto-commit triggers two engine passes:
+
+  Pass 1 — response (assistant reply, user sees this first):
+    response.created → response.text.delta × N → response.text.done → response.done
+  Pass 2 — transcription (user-side, fills conversation history):
+    conversation.item.input_audio_transcription.delta × N → .completed
+
+Tests cover:
+  - the full VAD → response → transcription sequence on a real wav;
+  - clean teardown when the client disconnects mid-flight.
 
 Usage:
     pytest tests/test_model/test_qwen3_omni_realtime.py -s -x
@@ -70,6 +84,11 @@ def _load_pcm16_16k_mono(path: Path) -> bytes:
         return wf.readframes(wf.getnframes())
 
 
+def _wav_with_silence_trailer() -> bytes:
+    """Load fixture + 1 s trailing silence so VAD reliably fires speech_stopped."""
+    return _load_pcm16_16k_mono(AUDIO_FIXTURE) + b"\x00\x00" * 16000
+
+
 async def _recv_event(ws) -> dict:
     return json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
 
@@ -87,182 +106,102 @@ async def _recv_until(ws, terminal_type: str, *, limit: int = 300) -> list[dict]
     )
 
 
+async def _stream_audio(ws, pcm: bytes, chunk_ms: int = 200) -> None:
+    """Stream PCM16 to the server in fixed-duration chunks."""
+    chunk_bytes = 16000 * chunk_ms // 1000 * 2
+    for i in range(0, len(pcm), chunk_bytes):
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(pcm[i : i + chunk_bytes]).decode(),
+                }
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_response_create_streams_text_deltas(
+async def test_vad_audio_emits_response_then_transcription(
     server_process: subprocess.Popen,
 ) -> None:
-    """Real engine drives response.created → text.delta × N → text.done → done."""
+    """VAD auto-commit drives full lifecycle: VAD → response.* → transcription.*."""
     port: int = server_process.port  # type: ignore[attr-defined]
-    with disable_proxy():
-        async with websockets.connect(_ws_url(port)) as ws:
-            await _recv_event(ws)  # session.created
-
-            # Override instructions to make the response short + predictable.
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {
-                            "instructions": (
-                                "Reply with exactly one word: OK. " "No punctuation."
-                            ),
-                        },
-                    }
-                )
-            )
-            await _recv_event(ws)  # session.updated
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "Say it."}],
-                        },
-                    }
-                )
-            )
-            await _recv_event(ws)  # conversation.item.created
-
-            await ws.send(json.dumps({"type": "response.create"}))
-            events = await _recv_until(ws, "response.done")
-
-    types = [e["type"] for e in events]
-    assert types[0] == "response.created", types
-    assert "response.text.delta" in types, types
-    assert "response.text.done" in types, types
-    deltas = [e["delta"] for e in events if e["type"] == "response.text.delta"]
-    assert "".join(deltas).strip(), "expected non-empty response text"
-
-
-@pytest.mark.asyncio
-async def test_server_vad_auto_commit_transcribes_real_audio(
-    server_process: subprocess.Popen,
-) -> None:
-    """Server VAD detects speech, auto-commits, and yields a non-empty transcript."""
-    port: int = server_process.port  # type: ignore[attr-defined]
-    pcm = _load_pcm16_16k_mono(AUDIO_FIXTURE)
-    # 1 s silence trailer so VAD reliably emits speech_stopped after the
-    # fixture ends; without it the run can hang waiting for silence that
-    # arrives only at WS close.
-    pcm = pcm + b"\x00\x00" * 16000
+    pcm = _wav_with_silence_trailer()
 
     with disable_proxy():
         async with websockets.connect(_ws_url(port)) as ws:
             await _recv_event(ws)  # session.created
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {
-                            "instructions": (
-                                "You are a transcription engine. "
-                                "Transcribe the user's speech verbatim. "
-                                "Output ONLY the transcript."
-                            ),
-                            "turn_detection": {
-                                "type": "server_vad",
-                                "threshold": 0.5,
-                                "silence_duration_ms": 500,
-                                "prefix_padding_ms": 200,
-                            },
-                        },
-                    }
-                )
-            )
-            await _recv_event(ws)  # session.updated
-
-            # 200 ms chunks; no real-time pacing — VAD processes inline.
-            chunk_bytes = 16000 * 200 // 1000 * 2
-            for i in range(0, len(pcm), chunk_bytes):
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(
-                                pcm[i : i + chunk_bytes]
-                            ).decode(),
-                        }
-                    )
-                )
-
+            await _stream_audio(ws, pcm)
+            # transcription.completed is the last event in the per-turn sequence.
             events = await _recv_until(
                 ws, "conversation.item.input_audio_transcription.completed"
             )
 
     types = [e["type"] for e in events]
+    # VAD lifecycle
     assert "input_audio_buffer.speech_started" in types, types
     assert "input_audio_buffer.speech_stopped" in types, types
     assert "input_audio_buffer.committed" in types, types
-    assert "conversation.item.created" in types, types
+    # Response pass (assistant reply)
+    assert "response.created" in types, types
+    assert "response.text.delta" in types, types
+    assert "response.text.done" in types, types
+    assert "response.done" in types, types
+    # Transcription pass (user-side)
+    assert "conversation.item.input_audio_transcription.delta" in types, types
+
+    # Response must come before transcription per design (user sees reply first).
+    response_done_idx = types.index("response.done")
+    transcription_completed_idx = types.index(
+        "conversation.item.input_audio_transcription.completed"
+    )
+    assert response_done_idx < transcription_completed_idx, (
+        f"response.done must precede transcription.completed; got {types}"
+    )
+
+    # Both passes must produce non-empty text.
+    response_done = next(e for e in events if e["type"] == "response.done")
+    response_text = response_done["response"]["output"][0]["content"][0]["text"]
+    assert response_text.strip(), (
+        f"expected non-empty response text; got {response_done!r}"
+    )
+
     completed = next(
         e
         for e in events
         if e["type"] == "conversation.item.input_audio_transcription.completed"
     )
-    assert completed.get(
-        "transcript", ""
-    ).strip(), f"expected non-empty transcript; got {completed!r}"
+    assert completed.get("transcript", "").strip(), (
+        f"expected non-empty transcript; got {completed!r}"
+    )
 
 
 @pytest.mark.asyncio
 async def test_disconnect_during_response_keeps_server_healthy(
     server_process: subprocess.Popen,
 ) -> None:
-    """An abrupt disconnect after kicking off a response must not leak tasks
-    or break the route — /health still answers and a fresh WS still works.
-    """
+    """Mid-flight disconnect must not leak tasks — /health stays up and a fresh WS works."""
     port: int = server_process.port  # type: ignore[attr-defined]
+    pcm = _wav_with_silence_trailer()
+
     with disable_proxy():
         async with websockets.connect(_ws_url(port)) as ws:
             await _recv_event(ws)  # session.created
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {
-                            "instructions": "Reply with the single word: OK.",
-                        },
-                    }
-                )
-            )
-            await _recv_event(ws)  # session.updated
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "Now."}],
-                        },
-                    }
-                )
-            )
-            await _recv_event(ws)  # conversation.item.created
-            await ws.send(json.dumps({"type": "response.create"}))
-            # Take a single response event to confirm the response task is
-            # alive on the server, then close abruptly — the exact event
-            # type doesn't matter for the disconnect-cleanup contract.
-            evt = await _recv_event(ws)
-            assert evt.get("type", "").startswith("response."), evt
-        # Context manager exit closes the WebSocket abruptly.
+            await _stream_audio(ws, pcm)
+            # Take a few events to confirm the response task is alive on the
+            # server, then close abruptly without draining the rest.
+            for _ in range(5):
+                await _recv_event(ws)
+        # Context manager exit closes the WebSocket.
 
-        # Server's manager.close → session.teardown must clean up without
-        # raising; if it leaked the engine call or re-raised CancelledError
-        # from .exception(), /health would either fail or hang.
         resp = requests.get(f"http://localhost:{port}/health", timeout=10)
         assert resp.status_code == 200, resp.text
 
-        # And a fresh WS connection should still be accepted.
         async with websockets.connect(_ws_url(port)) as ws:
             evt = await _recv_event(ws)
             assert evt["type"] == "session.created", evt

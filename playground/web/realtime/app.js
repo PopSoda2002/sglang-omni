@@ -2,10 +2,11 @@
  * WIRE SERVICE — sglang-omni /v1/realtime
  *
  * Captures mic → 16 kHz mono PCM16 via AudioWorklet → base64-encodes →
- * sends `input_audio_buffer.append`. Renders incoming `transcription.delta`
- * events as italic Newsreader paragraphs with serif drop-caps; the
- * server-VAD pill pulses while a turn is in flight; an oscilloscope
- * canvas shows the live mic waveform.
+ * sends `input_audio_buffer.append`. Server VAD is always on; auto-commit
+ * fires on speech_stopped. Each turn renders an editorial card with two
+ * paragraphs: the assistant's reply (streamed from response.text.delta)
+ * appears first, then the verbatim transcript of what you said (streamed
+ * from conversation.item.input_audio_transcription.delta) fills in below.
  *
  * Vanilla — no framework, no build step, no error handling. Per house
  * style: if something fails, the browser console gets the exception.
@@ -18,7 +19,6 @@
 
   // ─────────────────────  DOM refs  ─────────────────────
   const wsUrlEl       = $("ws-url");
-  const modeEl        = $("mode");
   const instructionsEl = $("instructions");
   const connectBtn    = $("connect");
   const disconnectBtn = $("disconnect");
@@ -29,7 +29,6 @@
 
   const micStartBtn   = $("mic-start");
   const micStopBtn    = $("mic-stop");
-  const commitBtn     = $("commit");
   const clearBufferBtn = $("clear-buffer");
   const micStatusEl   = $("mic-status");
   const oscilloCanvas = $("oscilloscope");
@@ -44,9 +43,12 @@
   let workletNode = null;
   let analyserNode = null;
   let drawRaf = 0;
-  let utteranceCounter = 0;
-  const utteranceNodes = new Map();   // item_id → DOM node
-  const utteranceSerials = new Map(); // item_id → serial string
+  let turnCounter = 0;
+  // Each turn card is keyed by the audio item_id minted at speech_started /
+  // committed. response.text.delta events have no item_id link to the audio,
+  // so we route them to whichever turn is currently in flight.
+  const turnCards = new Map();           // item_id → DOM node
+  let currentTurnItemId = null;          // most recent committed/speech_started id
   const TARGET_SR = 16000;
 
   // ─────────────────────  Status helpers  ─────────────────────
@@ -70,9 +72,6 @@
     micStatusEl.textContent = text;
   }
 
-  // (Wire feed log removed — too noisy; protocol traffic only matters
-  // to me as the developer, not to anyone using the demo.)
-
   // ─────────────────────  WebSocket  ─────────────────────
 
   function wsSend(payload) {
@@ -81,23 +80,16 @@
   }
 
   function sendSessionUpdate() {
-    const sessionConfig = {
-      modalities: ["text"],
-      input_audio_format: "pcm16",
-      instructions: instructionsEl.value,
-      // Always include turn_detection so flipping the dropdown actually
-      // toggles server-side VAD instead of leaving stale config.
-      turn_detection:
-        modeEl.value === "server_vad"
-          ? {
-              type: "server_vad",
-              threshold: 0.5,
-              silence_duration_ms: 1000,
-              prefix_padding_ms: 300,
-            }
-          : { type: "none" },
-    };
-    wsSend({ type: "session.update", session: sessionConfig });
+    // turn_detection is fixed server-side (always server_vad with defaults);
+    // only instructions and audio format need to be sent.
+    wsSend({
+      type: "session.update",
+      session: {
+        modalities: ["text"],
+        input_audio_format: "pcm16",
+        instructions: instructionsEl.value,
+      },
+    });
   }
 
   connectBtn.addEventListener("click", () => {
@@ -111,7 +103,6 @@
       connectBtn.disabled = true;
       disconnectBtn.disabled = false;
       micStartBtn.disabled = false;
-
       sendSessionUpdate();
     };
 
@@ -126,7 +117,6 @@
       disconnectBtn.disabled = true;
       micStartBtn.disabled = true;
       micStopBtn.disabled = true;
-      commitBtn.disabled = true;
       clearBufferBtn.disabled = true;
       stopMic();
       ws = null;
@@ -146,19 +136,17 @@
   micStartBtn.addEventListener("click", () => startMic());
   micStopBtn.addEventListener("click", () => {
     stopMic();
-    clearTranscripts();
+    clearTurns();
   });
 
-  function clearTranscripts() {
-    utteranceNodes.clear();
-    utteranceSerials.clear();
-    utteranceCounter = 0;
+  function clearTurns() {
+    turnCards.clear();
+    turnCounter = 0;
+    currentTurnItemId = null;
     transcriptsEl.innerHTML =
       '<p class="empty-state">The wire is quiet. Open it, then speak.</p>';
   }
-  commitBtn.addEventListener("click", () =>
-    wsSend({ type: "input_audio_buffer.commit" }),
-  );
+
   clearBufferBtn.addEventListener("click", () =>
     wsSend({ type: "input_audio_buffer.clear" }),
   );
@@ -223,20 +211,11 @@
     setMicStatus("Channel hot");
     micStartBtn.disabled = true;
     micStopBtn.disabled = false;
-    commitBtn.disabled = modeEl.value === "server_vad";
     clearBufferBtn.disabled = false;
     drawScope();
   }
 
   function stopMic() {
-    // If there's any audio still buffered server-side, commit it
-    // explicitly. Without this, server-VAD utterances that haven't
-    // hit silence_duration_ms hang forever; manual-mode buffers full
-    // of pending audio also get lost.
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      wsSend({ type: "input_audio_buffer.commit" });
-    }
-
     if (workletNode) { workletNode.disconnect(); workletNode = null; }
     if (analyserNode) { analyserNode.disconnect(); analyserNode = null; }
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -251,7 +230,6 @@
     clearScope();
     setMicStatus("Channel cold");
     micStopBtn.disabled = true;
-    commitBtn.disabled = true;
     clearBufferBtn.disabled = true;
     if (ws && ws.readyState === WebSocket.OPEN) {
       micStartBtn.disabled = false;
@@ -336,50 +314,63 @@
         return;
 
       case "input_audio_buffer.speech_started":
-        ensureUtterance(evt.item_id, "in-progress");
-        setItemMeta(evt.item_id, `started ${ms(evt.audio_start_ms)}`);
+        currentTurnItemId = evt.item_id;
+        ensureTurn(evt.item_id);
+        setTurnMeta(evt.item_id, `started ${ms(evt.audio_start_ms)}`);
         return;
 
       case "input_audio_buffer.speech_stopped":
-        setItemMeta(evt.item_id, `stopped ${ms(evt.audio_end_ms)}`);
+        setTurnMeta(evt.item_id, `stopped ${ms(evt.audio_end_ms)}`);
         return;
 
       case "input_audio_buffer.committed":
-        ensureUtterance(evt.item_id, "in-progress");
-        setItemMeta(evt.item_id, "committed · transcribing");
+        currentTurnItemId = evt.item_id;
+        ensureTurn(evt.item_id);
+        setTurnMeta(evt.item_id, "committed · awaiting reply");
         return;
 
-      case "conversation.item.input_audio_transcription.delta": {
-        const node = ensureUtterance(evt.item_id, "in-progress");
-        const body = node.querySelector(".utterance-body");
-        body.textContent += evt.delta || "";
-        return;
-      }
-
-      case "conversation.item.input_audio_transcription.completed": {
-        const node = ensureUtterance(evt.item_id, "completed");
-        node.dataset.state = "completed";
-        const body = node.querySelector(".utterance-body");
-        const final = evt.transcript || body.textContent || "";
-        if (final.trim()) {
-          body.textContent = final;
-          setItemMeta(evt.item_id, "completed");
-        } else {
-          body.textContent = "[silent — model returned empty transcript]";
-          body.style.fontStyle = "italic";
-          body.style.color = "var(--ink-faint)";
-          setItemMeta(evt.item_id, "completed (empty)");
+      // ── Pass 1: assistant reply (streams first) ──
+      case "response.created":
+        if (currentTurnItemId) {
+          setTurnMeta(currentTurnItemId, "replying");
         }
         return;
-      }
 
-      case "conversation.item.input_audio_transcription.failed": {
-        const node = ensureUtterance(evt.item_id, "failed");
-        node.dataset.state = "failed";
-        setItemMeta(
-          evt.item_id,
-          "failed: " + ((evt.error && evt.error.message) || "unknown"),
-        );
+      case "response.text.delta":
+        if (currentTurnItemId) {
+          appendToBody(currentTurnItemId, "assistant-body", evt.delta || "");
+        }
+        return;
+
+      case "response.text.done":
+        if (currentTurnItemId) {
+          setTurnMeta(currentTurnItemId, "reply done · transcribing");
+        }
+        return;
+
+      case "response.done":
+        return;
+
+      // ── Pass 2: transcription of what the user said (streams after) ──
+      case "conversation.item.input_audio_transcription.delta":
+        appendToBody(evt.item_id, "user-body", evt.delta || "");
+        return;
+
+      case "conversation.item.input_audio_transcription.completed": {
+        const node = ensureTurn(evt.item_id);
+        node.dataset.state = "completed";
+        const body = node.querySelector(".user-body");
+        const final = evt.transcript || (body && body.textContent) || "";
+        if (body) {
+          if (final.trim()) {
+            body.textContent = final;
+          } else {
+            body.textContent = "[silent — empty transcript]";
+            body.style.fontStyle = "italic";
+            body.style.color = "var(--ink-faint)";
+          }
+        }
+        setTurnMeta(evt.item_id, "complete");
         return;
       }
 
@@ -392,35 +383,43 @@
     }
   }
 
-  function ensureUtterance(itemId, state) {
-    let node = utteranceNodes.get(itemId);
+  function ensureTurn(itemId) {
+    let node = turnCards.get(itemId);
     if (node) return node;
 
     const empty = transcriptsEl.querySelector(".empty-state");
     if (empty) empty.remove();
 
-    utteranceCounter += 1;
-    const serial = "№ " + String(utteranceCounter).padStart(3, "0");
-    utteranceSerials.set(itemId, serial);
+    turnCounter += 1;
+    const serial = "№ " + String(turnCounter).padStart(3, "0");
 
     node = document.createElement("article");
     node.className = "utterance";
-    node.dataset.state = state;
+    node.dataset.state = "in-progress";
     node.innerHTML =
       `<div class="utterance-meta">` +
       `<span class="serial">${serial}</span>` +
       `<span class="ts">${nowTime()}</span>` +
       `<span class="state">opening</span>` +
       `</div>` +
-      `<p class="utterance-body"></p>`;
+      `<p class="utterance-role">Assistant</p>` +
+      `<p class="utterance-body assistant-body"></p>` +
+      `<p class="utterance-role">You said</p>` +
+      `<p class="utterance-body user-body"></p>`;
     transcriptsEl.appendChild(node);
     transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
-    utteranceNodes.set(itemId, node);
+    turnCards.set(itemId, node);
     return node;
   }
 
-  function setItemMeta(itemId, stateText) {
-    const node = utteranceNodes.get(itemId);
+  function appendToBody(itemId, bodyClass, text) {
+    const node = ensureTurn(itemId);
+    const body = node.querySelector("." + bodyClass);
+    if (body) body.textContent += text;
+  }
+
+  function setTurnMeta(itemId, stateText) {
+    const node = turnCards.get(itemId);
     if (!node) return;
     const stateEl = node.querySelector(".utterance-meta .state");
     if (stateEl) stateEl.textContent = stateText;
@@ -433,14 +432,6 @@
   }
 
   // ─────────────────────  Misc UI  ─────────────────────
-
-  modeEl.addEventListener("change", () => {
-    if (audioCtx) {
-      commitBtn.disabled = modeEl.value === "server_vad";
-    }
-    // Re-send so the server actually flips VAD on/off in step with the UI.
-    sendSessionUpdate();
-  });
 
   instructionsEl.addEventListener("change", () => sendSessionUpdate());
 })();
