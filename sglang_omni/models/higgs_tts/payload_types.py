@@ -12,52 +12,34 @@ from typing import Any
 
 @dataclass
 class HiggsTtsState:
-    """Per-request state for the Higgs TTS pipeline.
+    """Per-request state threaded through preprocessing → audio_encoder →
+    tts_engine → vocoder. Fields populate lazily so a deserialised state is
+    valid at any stage boundary."""
 
-    preprocessing → audio_encoder → tts_engine → vocoder. Each stage reads /
-    writes fields below; fields are populated lazily so a deserialised state
-    works at any stage boundary.
-    """
-
-    # Filled by preprocessing (or audio_encoder, depending on raw-vs-encoded
-    # ref-audio path).
+    # preprocessing / audio_encoder
     prompt_token_ids: list[int] = field(default_factory=list)
-    """Prompt ids with ``AUDIO_PLACEHOLDER_ID`` (-100) at ref-audio positions."""
-
     reference_codes_delayed: list[list[int]] | None = None
-    """Delayed ref-audio codes ``[num_ref_tokens, num_codebooks]``. ``None`` for
-    zero-shot. Consumed by tts_engine prefill to compute the fused multi-codebook
-    embedding inline (the ``-100`` overlay).
-    """
-
-    # Carried from preprocessing to audio_encoder when raw waveform input.
     target_text: str | None = None
     reference_text: str | None = None
-    reference_waveform: Any | None = None
-    """Mono 24 kHz float32 waveform ``torch.Tensor`` ([1, 1, L]). ``None`` once
-    audio_encoder has consumed it (or for the pre-encoded fast path)."""
+    reference_waveform: Any | None = None  # mono 24 kHz [1, 1, L] torch.Tensor
 
     num_codebooks: int = 8
     codebook_size: int = 1026  # 1024 data + <|boc|> + <|eoc|>
 
-    # Generation parameters (consumed by tts_engine).
+    # generation params
     max_new_tokens: int = 2048
     temperature: float = 1.0
     top_p: float | None = None
     top_k: int | None = None
     seed: int | None = None
 
-    # Filled by tts_engine.
+    # tts_engine
     output_codes_delayed: list[list[int]] | None = None
-    """Multi-codebook codes produced by the engine, shape
-    ``[num_steps, num_codebooks]`` serialised as nested list. The vocoder
-    applies :func:`reverse_delay_pattern` before decoding."""
-
     prompt_tokens: int = 0
     completion_tokens: int = 0
     engine_time_s: float = 0.0
 
-    # Filled by vocoder.
+    # vocoder
     audio_samples: Any | None = None
     sample_rate: int = 24000
 

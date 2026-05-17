@@ -23,7 +23,7 @@ WaveformInput = torch.Tensor | np.ndarray
 
 
 def _to_mono_3d(waveform: WaveformInput) -> torch.Tensor:
-    """Normalise any (Tensor | ndarray) waveform to a mono ``[1, 1, L]`` tensor."""
+    """Normalise (Tensor | ndarray) waveform to mono ``[1, 1, L]``."""
     if isinstance(waveform, np.ndarray):
         wav = torch.from_numpy(np.ascontiguousarray(waveform))
     elif isinstance(waveform, torch.Tensor):
@@ -36,7 +36,7 @@ def _to_mono_3d(waveform: WaveformInput) -> torch.Tensor:
     if wav.ndim == 1:
         return wav.view(1, 1, -1)
     if wav.ndim == 2:
-        return wav[:1].unsqueeze(0)  # [C, L] → keep first channel
+        return wav[:1].unsqueeze(0)
     if wav.ndim == 3:
         if wav.shape[1] != 1:
             raise ValueError(f"audio must be mono, got shape {tuple(wav.shape)}")
@@ -54,7 +54,7 @@ class HiggsAudioCodec:
     ) -> None:
         self.model = model
         self.device = device
-        self._dtype = next(model.parameters()).dtype  # avoid model.dtype param walk
+        self._dtype = next(model.parameters()).dtype
 
     @classmethod
     def from_pretrained(
@@ -64,11 +64,7 @@ class HiggsAudioCodec:
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> "HiggsAudioCodec":
-        """Load the Higgs Audio V2 tokenizer (e.g. ``bosonai/higgs-audio-v2-tokenizer``).
-
-        ``dtype`` defaults to fp32. bf16 works for encode but the decode
-        ConvTranspose path is less stable in bf16 — opt in explicitly.
-        """
+        """Default dtype is fp32; decode ConvTranspose is unstable in bf16."""
         device = torch.device(device)
         model = HiggsAudioV2TokenizerModel.from_pretrained(
             str(model_path), local_files_only=False
@@ -85,12 +81,11 @@ class HiggsAudioCodec:
         *,
         sample_rate: int | None = None,
     ) -> torch.Tensor:
-        """Encode a reference clip to ``[T, num_codebooks]`` int64 codes (CPU).
+        """Reference clip → ``[T, num_codebooks]`` int64 codes (CPU).
 
-        Accepts 1-D ``[L]``, 2-D ``[C, L]`` (first channel), or 3-D ``[1, 1, L]``
-        float32 waveform in ``[-1, 1]``. Resamples to 24 kHz if ``sample_rate``
-        differs. Clips < 1 s are zero-padded (the encoder errors otherwise;
-        the trailing silence is trimmed by the delay pattern downstream).
+        Accepts 1-D ``[L]``, 2-D ``[C, L]``, or 3-D ``[1, 1, L]`` float32 in
+        ``[-1, 1]``. Resamples to 24 kHz; clips < 1 s are zero-padded since
+        the encoder errors otherwise.
         """
         wav = _to_mono_3d(waveform).to(torch.float32)
         sr = sample_rate or self.SAMPLE_RATE
@@ -100,12 +95,12 @@ class HiggsAudioCodec:
             wav = F.pad(wav, (0, self.SAMPLE_RATE - wav.shape[-1]))
 
         wav = wav.to(device=self.device, dtype=self._dtype)
-        codes_BNT = self.model.encode(wav).audio_codes  # [1, N, T]
+        codes_BNT = self.model.encode(wav).audio_codes
         return codes_BNT.squeeze(0).transpose(0, 1).to(torch.long).cpu()
 
     @torch.no_grad()
     def decode(self, codes_TN: torch.Tensor) -> torch.Tensor:
-        """Decode ``[T, num_codebooks]`` codes to a mono waveform ``[L]``."""
+        """``[T, num_codebooks]`` → mono waveform ``[L]``."""
         if codes_TN.ndim != 2:
             raise ValueError(
                 f"codes must be 2-D [T, num_codebooks], got {tuple(codes_TN.shape)}"

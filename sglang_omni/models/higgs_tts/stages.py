@@ -41,17 +41,13 @@ from sglang_omni.proto import StagePayload
 logger = logging.getLogger(__name__)
 
 
-# Default open-source audio codec.
 DEFAULT_AUDIO_CODEC = "bosonai/higgs-audio-v2-tokenizer"
 
-# Reference-audio length cap. Codec runs at 75 Hz (24000/320); chunked
-# prefill is unsafe for the multi-codebook prompt (the sampler state
-# machine has no rollback path), so reject inputs that would push the
-# prompt past sglang's ``chunked_prefill_size`` threshold.
+# Codec runs at 75 Hz; chunked prefill of the multi-codebook prompt is unsafe
+# (sampler state machine has no rollback) so reject inputs past chunked_prefill_size.
 _MAX_REF_AUDIO_SEC = 100
 
-# Shared codec instances between preprocessing and vocoder stages — saves
-# ~1 GB of VRAM + one load pass at server startup.
+# Shared between audio_encoder + vocoder; one codec load saves ~1 GB VRAM.
 _CODEC_CACHE: dict[tuple[str, str, str], Any] = {}
 
 
@@ -165,10 +161,8 @@ def create_preprocessing_executor(
 
     checkpoint_dir = _resolve_checkpoint(model_path)
 
-    # Higgs ckpts ship ``tokenizer_config.json`` with transformers v5 metadata
-    # that crashes transformers<5's ``from_pretrained``. Load tokenizer.json
-    # directly via the ``tokenizers`` library — schema-version-independent —
-    # and wrap in a PreTrainedTokenizerFast.
+    # Higgs ckpt tokenizer_config.json uses transformers v5 metadata and crashes
+    # transformers<5's from_pretrained; load tokenizer.json directly to avoid it.
     raw = Tokenizer.from_file(os.path.join(checkpoint_dir, "tokenizer.json"))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw)
     adapter = HiggsTokenizerAdapter(tokenizer)
@@ -232,7 +226,6 @@ def create_preprocessing_executor(
             target_text_for_encoder = None
             reference_text_for_encoder = None
         elif waveform_tensor is None:
-            # zero-shot
             prompt_ids = adapter.build_prompt(
                 text, num_ref_tokens=0, reference_text=reference_text
             )
@@ -240,7 +233,6 @@ def create_preprocessing_executor(
             target_text_for_encoder = None
             reference_text_for_encoder = None
         else:
-            # raw-audio path: prompt assembly deferred to audio_encoder
             prompt_ids = []
             ref_codes_delayed = None
             target_text_for_encoder = text
@@ -298,7 +290,7 @@ def create_audio_encoder_executor(
         state = HiggsTtsState.from_dict(payload.data)
         waveform = state.reference_waveform
         if waveform is None:
-            return payload  # zero-shot or client supplied pre-encoded codes
+            return payload
 
         ref_codes_TN = codec.encode_reference(waveform, sample_rate=24000).to(
             torch.long
@@ -315,7 +307,6 @@ def create_audio_encoder_executor(
             num_ref_tokens=delayed.shape[0],
             reference_text=state.reference_text,
         )
-        # Waveform / texts are no longer needed downstream.
         state.reference_waveform = None
         state.target_text = None
         state.reference_text = None
@@ -353,18 +344,14 @@ def create_sglang_tts_engine_executor(
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
     overrides: dict[str, Any] = {
-        # CUDA graph not supported — Higgs's per-request slot state lives
-        # outside the captured graph, and the multi-codebook decode runs
-        # in a Python loop.
+        # Per-request slot state + Python decode loop are not graph-capturable.
         "disable_cuda_graph": True,
         "mem_fraction_static": 0.85,
         "max_running_requests": 16,
         "chunked_prefill_size": 8192,
         "dtype": "bfloat16",
-        # Disable radix cache: TTS prompts share the
-        # ``<|tts|> <|ref_audio|> [-100]...`` token-id prefix but the -100
-        # positions are overlaid with different ref-audio embeddings per
-        # request, so caching by token id alone cross-contaminates.
+        # -100 placeholders share the token-id prefix but get different ref-audio
+        # overlays per request; radix cache by token id would cross-contaminate.
         "disable_radix_cache": True,
     }
     if server_args_overrides:
@@ -424,7 +411,7 @@ def create_vocoder_executor(
     from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
-    del model_path  # vocoder needs only the codec, not the TTS ckpt
+    del model_path
     codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
     codec = _get_or_load_codec(codec_src, device, dtype)
     sample_rate = HiggsAudioCodec.SAMPLE_RATE

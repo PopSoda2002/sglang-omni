@@ -13,17 +13,11 @@ from torch import nn
 
 
 class HiggsFusedMultiTextEmbedding(nn.Module):
-    """Fused multi-codebook embedding: single weight ``[N*V, D]`` with offset lookup.
+    """Fused multi-codebook embedding: one ``[N*V, D]`` weight + offset lookup.
 
-    Functionally equivalent to an ensemble of ``N`` per-codebook embeddings, but
-    stores all codebook embeddings in one contiguous parameter. Each codebook
-    occupies a slice of size ``V`` in the weight; the forward pass adds
-    per-codebook offsets (``0, V, 2V, ...``) before embedding lookup, then sums
-    across the codebook axis.
-
-    Shapes:
-        codes_LN: ``[..., N]`` integer codebook ids
-        returns:  ``[..., D]`` summed embedding
+    Equivalent to an ensemble of ``N`` per-codebook embeddings but stored
+    contiguously. ``codes_LN[..., N]`` → ``[..., D]`` summed across the
+    codebook axis.
     """
 
     def __init__(self, num_codebooks: int, vocab_size: int, hidden_size: int):
@@ -37,21 +31,13 @@ class HiggsFusedMultiTextEmbedding(nn.Module):
         V = self.vocab_size
         offsets = torch.arange(N, device=codes_LN.device, dtype=codes_LN.dtype) * V
         fused_ids = codes_LN + offsets
-        emb = F.embedding(fused_ids, self.weight)  # [..., N, D]
-        return emb.sum(dim=-2)  # [..., D]
+        return F.embedding(fused_ids, self.weight).sum(dim=-2)
 
 
 class HiggsFusedMultiTextHead(nn.Module):
-    """Fused multi-codebook head: single weight ``[N*V, D]``.
+    """Fused multi-codebook head: ``[L, D]`` → ``[L, N, V]`` via one linear.
 
-    Produces logits for all ``N`` codebooks via a single linear projection,
-    then reshapes to ``[L, N, V]``. Typically tied with
-    :class:`HiggsFusedMultiTextEmbedding` (i.e., ``head.weight is embedding.weight``)
-    when ``tie_word_embeddings`` is set in the encoder config.
-
-    Shapes:
-        hidden_LD: ``[L, D]``
-        returns:   ``[L, N, V]``
+    Tied with :class:`HiggsFusedMultiTextEmbedding` when ``tie_word_embeddings``.
     """
 
     def __init__(self, num_codebooks: int, vocab_size: int, hidden_size: int):
@@ -61,7 +47,7 @@ class HiggsFusedMultiTextHead(nn.Module):
         self.vocab_size = vocab_size
 
     def generate(self, hidden_LD: torch.Tensor) -> torch.Tensor:
-        logits = F.linear(hidden_LD, self.weight)  # [L, N*V]
+        logits = F.linear(hidden_LD, self.weight)
         return logits.reshape(
             hidden_LD.shape[0],
             self.num_codebooks,

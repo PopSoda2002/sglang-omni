@@ -27,19 +27,12 @@ import torch
 
 from sglang_omni.models.higgs_tts.utils import BOC_ID, EOC_ID
 
-# Signal returned by ``step`` after ``generation_done`` is set. A sentinel
-# ``-1`` per codebook tells the engine layer this request has terminated.
+# Sentinel returned by ``step`` after ``generation_done``; engine treats as stop.
 STOP_CODE = -1
 
 
 @dataclass
 class HiggsSamplerState:
-    """Per-request state for :func:`step`.
-
-    The caller keeps one instance per live request and threads it through
-    every step until :attr:`generation_done` is set (or max_new_tokens is hit).
-    """
-
     num_codebooks: int
     delay_count: int = 0
     eoc_countdown: int | None = None
@@ -57,10 +50,7 @@ def _sample_independent(
     top_p: float | None,
     top_k: int | None,
 ) -> torch.Tensor:
-    """Sample one code per codebook independently. Returns shape ``[N]``."""
-    # Short-circuit to argmax for greedy or near-greedy temperatures. The
-    # threshold avoids `logits / temperature` overflowing to inf and the
-    # subsequent softmax producing NaN.
+    # Short-circuit greedy to dodge the inf/NaN from logits / tiny_temperature.
     if temperature <= _GREEDY_TEMP_THRESHOLD:
         return logits_NV.argmax(dim=-1)
 
@@ -75,7 +65,7 @@ def _sample_independent(
         sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
         cum_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
         remove = cum_probs > top_p
-        # Always keep the highest-prob token.
+        # Shift right + force-keep top token so the highest-prob token never gets cut.
         remove[..., 1:] = remove[..., :-1].clone()
         remove[..., 0] = False
         scatter = torch.zeros_like(remove)
@@ -126,18 +116,15 @@ def step(
     ).to(torch.long)
 
     if state.delay_count < N:
-        # Delay window: force later codebooks to boc_id.
         next_cb = state.delay_count + 1
         if next_cb < N:
             codes_N[next_cb:] = boc_id
         state.delay_count += 1
     elif state.eoc_countdown is not None:
-        # Wind-down: sample freely, just tick the counter.
         state.eoc_countdown -= 1
         if state.eoc_countdown <= 0:
             state.generation_done = True
     elif int(codes_N[0].item()) == eoc_id:
-        # codebook-0 emitted EOC: start wind-down (or stop immediately for N<=2).
         if N <= 2:
             state.generation_done = True
         else:

@@ -14,20 +14,11 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DiscreteWeightMapper:
-    """Weight name remapper for the discrete TTS path.
+    """Weight-name remapper for the discrete TTS path.
 
-    Args:
-        text_prefix_map: Maps Higgs prefixes for the text backbone to the
-            downstream parameter tree.
-        embedding_dest: Destination prefix for
-            ``tied.embedding.modality_embeddings.0.embedding.*`` (the fused
-            multi-codebook embedding weight).
-        head_dest: Destination prefix for ``tied.head.modality_heads.0.*`` (the
-            fused multi-codebook head). Ignored when ``tie_modality=True``
-            (the head shares the embedding weight).
-        tie_modality: Whether the modality head weight is tied to the
-            modality embedding weight. Must match the checkpoint's
-            ``audio_encoder_config.tie_word_embeddings`` flag.
+    ``tie_modality`` must match the ckpt's ``tie_word_embeddings`` flag;
+    when True the modality_head shares the embedding weight and the ckpt's
+    head copy is dropped.
     """
 
     text_prefix_map: dict[str, str]
@@ -36,7 +27,6 @@ class DiscreteWeightMapper:
     tie_modality: bool = True
 
     def _instance_prefix_map(self) -> dict[str, str]:
-        """Build the per-instance prefix map (discrete-mode only)."""
         mapping = {
             "tied.embedding.modality_embeddings.0.embedding.": self.embedding_dest,
         }
@@ -45,22 +35,15 @@ class DiscreteWeightMapper:
         return mapping
 
     def map(self, name: str) -> str | None:
-        """Map a Higgs checkpoint parameter name to the downstream name.
-
-        Returns ``None`` when the weight should be skipped (e.g., the audio
-        tokenizer's backbone weights that live inside the checkpoint but are
-        not part of the inference graph).
-        """
-        # Instance-specific mappings take priority.
+        """Map ckpt name to downstream name; ``None`` to skip the weight."""
         for higgs_prefix, dest_prefix in self._instance_prefix_map().items():
             if name.startswith(higgs_prefix):
                 return dest_prefix + name[len(higgs_prefix) :]
 
-        # Audio tokenizer backbone (frozen, not in the serving graph).
+        # Audio tokenizer backbone — frozen, not in the serving graph.
         if name.startswith("tied.embedding.modality_embeddings.0.model."):
             return None
 
-        # Text backbone.
         for higgs_prefix, dest_prefix in self.text_prefix_map.items():
             if name.startswith(higgs_prefix):
                 return dest_prefix + name[len(higgs_prefix) :]

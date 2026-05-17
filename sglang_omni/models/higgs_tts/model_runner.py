@@ -36,7 +36,7 @@ class HiggsTTSModelRunner(ModelRunner):
         input_embeds = self._build_prefill_input_embeds(forward_batch, requests)
         if input_embeds is not None:
             forward_batch.input_embeds = input_embeds
-        return None  # use standard tp_worker forward path
+        return None
 
     def post_prefill(self, result, forward_batch, schedule_batch, requests):
         del forward_batch, schedule_batch
@@ -64,8 +64,7 @@ class HiggsTTSModelRunner(ModelRunner):
         embed_tokens = self.model.backbone.model.embed_tokens
         fused_embed = self.model.multimodal_embedding.modality_embedding_0
 
-        # ``embed_tokens`` would OOB on -100; substitute 0 before embed, then
-        # overwrite at placeholder positions with the fused audio embedding.
+        # embed_tokens would OOB on -100; embed 0 first, overwrite placeholders below.
         placeholder_mask = input_ids == AUDIO_PLACEHOLDER_ID
         safe_ids = torch.where(placeholder_mask, torch.zeros_like(input_ids), input_ids)
         text_embeds = embed_tokens(safe_ids)
@@ -103,14 +102,12 @@ class HiggsTTSModelRunner(ModelRunner):
                         data.num_ref_codes_consumed = consumed + n_placeholders
             offset = end
 
-        # Zero-shot requests still pass embed_tokens(input_ids) through here so
-        # HiggsTTSModel.forward sees a consistent input_embeds shape.
         return text_embeds
 
     def _collect_step_outputs(self, result: Any, requests: list) -> None:
-        """Read newly emitted multi-codebook rows from the model and
-        overwrite ``result.next_token_ids`` with codebook-0 so the base
-        skips its text-vocab sampler.
+        """Pull per-request newly emitted codes from model slots into
+        ``data.output_codes`` and overwrite ``result.next_token_ids`` with
+        codebook-0 so the base runner skips its text-vocab sampler.
         """
         batch_size = len(requests)
         if batch_size == 0:

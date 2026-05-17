@@ -21,14 +21,7 @@ EOC_ID = 1025
 
 
 def apply_delay_pattern(codes_TN: torch.Tensor) -> torch.Tensor:
-    """Shift codebook ``c`` by ``c`` steps; pad with ``BOC_ID`` / ``EOC_ID``.
-
-    Args:
-        codes_TN: Raw multi-codebook tokens, shape ``[T, N]``.
-
-    Returns:
-        Delayed tokens, shape ``[T + N - 1, N]``.
-    """
+    """``[T, N]`` raw codes → ``[T + N - 1, N]`` delayed, BOC/EOC padded."""
     if codes_TN.ndim != 2:
         raise ValueError(
             f"codes_TN must be 2-D [T, N], got shape {tuple(codes_TN.shape)}"
@@ -45,12 +38,7 @@ def apply_delay_pattern(codes_TN: torch.Tensor) -> torch.Tensor:
 
 
 def reverse_delay_pattern(delayed_LN: torch.Tensor) -> torch.Tensor:
-    """Undo :func:`apply_delay_pattern`.
-
-    Given a delayed sequence of shape ``[L, N]`` (where ``L >= N - 1``),
-    pull codebook ``c`` back by ``c`` steps and return the
-    ``[L - (N - 1), N]`` data window.
-    """
+    """``[L, N]`` delayed (L >= N) → ``[L - (N - 1), N]`` raw codes."""
     if delayed_LN.ndim != 2:
         raise ValueError(
             f"delayed_LN must be 2-D [L, N], got shape {tuple(delayed_LN.shape)}"

@@ -15,31 +15,13 @@ from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 
 @dataclass
 class HiggsSGLangRequestData(SGLangARRequestData):
-    """Per-request state for the Higgs TTS scheduler.
-
-    Carries the delayed reference-audio codes (consumed inline by the model
-    runner via the fused multi-codebook embedding) plus the running list of
-    multi-codebook codes emitted by :class:`HiggsTTSModel`.
-    """
+    """Per-request state for the Higgs TTS scheduler."""
 
     reference_codes_delayed: list[list[int]] | None = None
-    """Delayed ref-audio codes ``[num_ref_tokens, num_codebooks]``. The
-    runner computes the fused embedding inline in ``prepare_prefill`` and
-    pastes it at the ``-100`` placeholder positions."""
-
     num_ref_codes_consumed: int = 0
-    """Rows of ``reference_codes_delayed`` already overlaid onto earlier
-    prefill chunks. Advanced by the model runner so chunked prefill slices
-    correctly across multiple extend calls."""
-
     num_codebooks: int = 8
     codebook_size: int = 1026
-
     output_codes: list[torch.Tensor] = field(default_factory=list)
-    """One ``[num_codebooks]`` long tensor per AR step, captured from
-    :class:`HiggsTTSModel`'s per-request slot in ``post_prefill`` /
-    ``post_decode``."""
-
     generation_done: bool = False
 
 
@@ -62,9 +44,7 @@ def build_sglang_higgs_request(
         sp_kwargs["top_k"] = int(state.top_k)
     sampling_params = SamplingParams(**sp_kwargs)
 
-    # ``Req`` consumes the int vocab size for codebook-0 padding tracking;
-    # use the backbone text vocab so primary cb0 can be threaded through
-    # sglang's regular sampling infra.
+    # vocab_size = backbone text vocab so cb0 rides sglang's standard sampler path.
     req = Req(
         rid=request_id,
         origin_input_text="",
@@ -72,9 +52,7 @@ def build_sglang_higgs_request(
         sampling_params=sampling_params,
         vocab_size=151_936,
     )
-    # V1's prefill manager probes these attrs on the Req. Fish sets them too;
-    # without them the scheduler crashes on the first prefill cycle with
-    # ``AttributeError: '_input_embeds_are_projected'``.
+    # V1's prefill manager probes these attrs; absence triggers AttributeError.
     req._codec_suppress_tokens = None
     req._input_embeds_are_projected = False
 
@@ -102,8 +80,6 @@ def apply_higgs_result(state: HiggsTtsState, data: HiggsSGLangRequestData) -> No
 
 
 def make_higgs_scheduler_adapters():
-    """Build StagePayload <-> scheduler adapters for Higgs TTS."""
-
     def request_builder(payload: StagePayload) -> HiggsSGLangRequestData:
         state = HiggsTtsState.from_dict(payload.data)
         data = build_sglang_higgs_request(state, request_id=payload.request_id)

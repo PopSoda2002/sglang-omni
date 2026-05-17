@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class HiggsBatchPlanner:
-    """SGLang-backed batch planner — direct port of FishBatchPlanner."""
+    """SGLang-backed batch planner."""
 
     def __init__(self, prefill_manager: Any, decode_manager: Any, server_args: Any):
         self.prefill_manager = prefill_manager
@@ -231,8 +231,6 @@ class HiggsResourceManager:
         data = request.data
         if data.req is not None:
             release_kv_cache(data.req, self.tree_cache)
-        # Drop the model's per-request slot (sampler state + accumulated codes)
-        # so a new request reusing the same id starts fresh.
         if self._model is not None:
             self._model.reset_request(request.request_id)
 
@@ -272,8 +270,7 @@ class HiggsIterationController:
 
 
 class HiggsScheduler:
-    """Stage-facing scheduler for Higgs TTS — direct adaptation of
-    :class:`FishScheduler` with Higgs's sampler-driven finish semantics."""
+    """Stage-facing scheduler with sampler-driven finish semantics."""
 
     def __init__(
         self,
@@ -305,7 +302,6 @@ class HiggsScheduler:
         self._submit_times: dict[str, float] = {}
         self._step_id = 0
 
-        # Resolve the underlying HiggsTTSModel for resource cleanup.
         model = getattr(model_runner, "model", None)
 
         self.batch_planner = HiggsBatchPlanner(
