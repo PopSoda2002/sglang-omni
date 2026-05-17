@@ -460,7 +460,9 @@ class HiggsScheduler:
 
     def abort(self, request_id: str) -> None:
         self._aborted_request_ids.add(request_id)
-        self._requests.pop(request_id, None)
+        request = self._requests.pop(request_id, None)
+        if request is not None:
+            self.resource_manager.free(request)
         self._submit_times.pop(request_id, None)
         self._waiting = deque(
             req_id for req_id in self._waiting if req_id != request_id
