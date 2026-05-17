@@ -86,27 +86,41 @@ def _to_codes_TN(raw: Any, num_codebooks: int) -> torch.Tensor | None:
 
 def _load_audio_to_24k(reference_audio: Any) -> tuple[np.ndarray, int] | None:
     """Normalise an ``inputs["reference_audio"]`` entry to a 24 kHz mono float32
-    numpy array. Accepts path, ``{audio_path|path|bytes|base64|data}`` dict, or None.
+    numpy array. Accepts local path, HTTP/HTTPS URL,
+    ``{audio_path|path|bytes|base64|data}`` dict, or None.
     """
     if reference_audio is None:
         return None
 
     from sglang_omni.models.higgs_tts.audio_codec import HiggsAudioCodec
     from sglang_omni.preprocessing.audio import AudioMediaIO
+    from sglang_omni.preprocessing.base import _is_url
 
     io = AudioMediaIO(target_sr=HiggsAudioCodec.SAMPLE_RATE)
 
-    if isinstance(reference_audio, (str, Path)):
-        audio, sr = io.load_file(Path(reference_audio))
+    def _load_path_or_url(src: str | Path) -> tuple[np.ndarray, int]:
+        if isinstance(src, str) and _is_url(src):
+            from sglang_omni.preprocessing.resource_connector import (
+                global_http_connection,
+            )
+
+            client = global_http_connection.get_sync_client()
+            response = client.get(src)
+            response.raise_for_status()
+            audio, sr = io.load_bytes(response.content)
+            return np.asarray(audio, dtype=np.float32), int(sr)
+        audio, sr = io.load_file(Path(src))
         return np.asarray(audio, dtype=np.float32), int(sr)
+
+    if isinstance(reference_audio, (str, Path)):
+        return _load_path_or_url(reference_audio)
 
     if isinstance(reference_audio, dict):
         if "audio_path" in reference_audio or "path" in reference_audio:
             path = reference_audio.get("audio_path") or reference_audio.get("path")
             if not path:
                 raise ValueError("reference_audio dict has an empty audio_path/path")
-            audio, sr = io.load_file(Path(path))
-            return np.asarray(audio, dtype=np.float32), int(sr)
+            return _load_path_or_url(path)
         if "bytes" in reference_audio:
             audio, sr = io.load_bytes(reference_audio["bytes"])
             return np.asarray(audio, dtype=np.float32), int(sr)
@@ -119,7 +133,7 @@ def _load_audio_to_24k(reference_audio: Any) -> tuple[np.ndarray, int] | None:
             return np.asarray(audio, dtype=np.float32), int(sr)
 
     raise TypeError(
-        "reference_audio must be a path, a "
+        "reference_audio must be a path, an HTTP/HTTPS URL, a "
         "{audio_path|path|bytes|base64|data} dict, or None"
     )
 
@@ -158,6 +172,21 @@ def create_preprocessing_executor(
         params = payload.request.params or {}
         if isinstance(inputs, str):
             inputs = {"text": inputs}
+
+        raw_refs = inputs.get("references")
+        if raw_refs and isinstance(raw_refs, list):
+            first = raw_refs[0]
+            if isinstance(first, dict):
+                inputs = dict(inputs)
+                if first.get("text") and not inputs.get("reference_text"):
+                    inputs["reference_text"] = first["text"]
+                if inputs.get("reference_audio") is None:
+                    if "bytes" in first or "base64" in first or "data" in first:
+                        inputs["reference_audio"] = first
+                    else:
+                        inputs["reference_audio"] = first.get(
+                            "audio_path"
+                        ) or first.get("path")
 
         text = inputs.get("input") or inputs.get("text") or ""
         reference_text = inputs.get("reference_text") or None
