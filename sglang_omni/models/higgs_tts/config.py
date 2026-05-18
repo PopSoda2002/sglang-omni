@@ -27,11 +27,13 @@ class HiggsTtsPipelineConfig(PipelineConfig):
     stages: list[StageConfig] = [
         StageConfig(
             name="preprocessing",
+            process="pipeline",
             factory=f"{_PKG}.stages.create_preprocessing_executor",
             next="audio_encoder",
         ),
         StageConfig(
             name="audio_encoder",
+            process="pipeline",
             factory=f"{_PKG}.stages.create_audio_encoder_executor",
             factory_args={"device": "cuda"},
             gpu=0,
@@ -39,6 +41,7 @@ class HiggsTtsPipelineConfig(PipelineConfig):
         ),
         StageConfig(
             name="tts_engine",
+            process="pipeline",
             factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
             factory_args={"device": "cuda", "max_new_tokens": 2048},
             gpu=0,
@@ -46,6 +49,7 @@ class HiggsTtsPipelineConfig(PipelineConfig):
         ),
         StageConfig(
             name="vocoder",
+            process="pipeline",
             factory=f"{_PKG}.stages.create_vocoder_executor",
             factory_args={"device": "cuda"},
             gpu=0,
