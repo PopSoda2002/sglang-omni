@@ -58,8 +58,6 @@ from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleSched
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_AUDIO_CODEC = "bosonai/higgs-audio-v2-tokenizer"
-
 # Codec runs at 75 Hz; chunked prefill of the multi-codebook prompt is unsafe
 # (sampler state machine has no rollback) so reject inputs past chunked_prefill_size.
 _MAX_REF_AUDIO_SEC = 100
@@ -177,7 +175,6 @@ def create_preprocessing_executor(
 def create_audio_encoder_executor(
     model_path: str,
     *,
-    audio_codec_path: str | None = None,
     device: str = "cuda:0",
     dtype: str = "bfloat16",
     num_codebooks: int = 8,
@@ -187,15 +184,15 @@ def create_audio_encoder_executor(
     """GPU stage: codec-encode raw ref audio → delayed codes + prompt assembly.
 
     No-op when preprocessing already produced ``reference_codes_delayed`` (the
-    client-supplied pre-encoded fast path).
+    client-supplied pre-encoded fast path). Codec weights are extracted from
+    the TTS checkpoint itself (bundled at ``tied.embedding.modality_embeddings``).
     """
     checkpoint_dir = resolve_checkpoint(model_path)
     raw = Tokenizer.from_file(os.path.join(checkpoint_dir, "tokenizer.json"))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw)
     adapter = HiggsTokenizerAdapter(tokenizer)
 
-    codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
-    codec = get_or_load_codec(codec_src, device, dtype)
+    codec = get_or_load_codec(checkpoint_dir, device, dtype)
 
     def _encode(payload: StagePayload) -> StagePayload:
         state = HiggsTtsState.from_dict(payload.data)
@@ -300,16 +297,17 @@ def create_sglang_tts_engine_executor(
 def create_vocoder_executor(
     model_path: str,
     *,
-    audio_codec_path: str | None = None,
     device: str = "cuda:0",
     dtype: str = "bfloat16",
     max_batch_size: int = 4,
     max_batch_wait_ms: int = 2,
 ):
-    """Decode Higgs delayed codes to a mono 24 kHz waveform."""
-    del model_path
-    codec_src = audio_codec_path or DEFAULT_AUDIO_CODEC
-    codec = get_or_load_codec(codec_src, device, dtype)
+    """Decode Higgs delayed codes to a mono 24 kHz waveform.
+
+    Codec weights are extracted from the TTS checkpoint itself.
+    """
+    checkpoint_dir = resolve_checkpoint(model_path)
+    codec = get_or_load_codec(checkpoint_dir, device, dtype)
     sample_rate = HiggsAudioCodec.SAMPLE_RATE
 
     def _vocode(payload: StagePayload) -> StagePayload:
