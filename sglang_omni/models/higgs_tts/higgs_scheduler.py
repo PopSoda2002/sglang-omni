@@ -226,8 +226,14 @@ class HiggsResourceManager:
 
     def free(self, request: SchedulerRequest) -> None:
         data = request.data
-        if data.req is not None:
-            release_kv_cache(data.req, self.tree_cache)
+        req = data.req
+        # A queued request aborted before prefill has no req_pool_idx;
+        # release_kv_cache would trip sglang's pool-state assertion. Skip
+        # the release when no slot has been allocated yet.
+        if req is not None and (
+            req.req_pool_idx is not None or req.mamba_pool_idx is not None
+        ):
+            release_kv_cache(req, self.tree_cache)
         if self._model is not None:
             self._model.reset_request(request.request_id)
 

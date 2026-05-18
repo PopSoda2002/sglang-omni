@@ -62,6 +62,8 @@ def build_sglang_higgs_request(
         sp_kwargs["top_p"] = float(state.top_p)
     if state.top_k is not None:
         sp_kwargs["top_k"] = int(state.top_k)
+    if state.seed is not None:
+        sp_kwargs["seed"] = int(state.seed)
     sampling_params = SamplingParams(**sp_kwargs)
 
     # vocab_size = backbone text vocab so cb0 rides sglang's standard sampler path.
