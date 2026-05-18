@@ -44,6 +44,13 @@ CI Usage:
         --output-dir results/qwen3_omni_en \
         --model qwen3-omni --lang en --device cuda:0
 
+    # Speaker similarity only
+    python -m benchmarks.eval.benchmark_omni_seedtts \
+        --similarity-only \
+        --meta seedtts_testset/en/meta.lst \
+        --output-dir results/qwen3_omni_en \
+        --model qwen3-omni --similarity-device cuda:0
+
 
 H200 Full-Set Reference Results
 
@@ -143,9 +150,11 @@ from benchmarks.metrics.performance import (
     compute_speed_metrics,
     print_speed_summary,
 )
+from benchmarks.metrics.speaker_similarity import DEFAULT_SPEAKER_SIMILARITY_MODEL
 from benchmarks.tasks.tts import (
     VoiceCloneOmni,
     build_base_url,
+    run_seedtts_similarity,
     run_seedtts_transcribe,
     save_generated_audio_metadata,
     save_speed_results,
@@ -180,6 +189,10 @@ class OmniSeedttsBenchmarkConfig:
     disable_tqdm: bool = False
     # Transcribe phase
     device: str = "cuda:0"
+    # Speaker-similarity phase
+    similarity: bool = False
+    similarity_model: str = DEFAULT_SPEAKER_SIMILARITY_MODEL
+    similarity_device: str | None = None
 
 
 def _build_results_config(
@@ -340,6 +353,24 @@ def evaluate_generated_audio(config: OmniSeedttsBenchmarkConfig) -> dict:
     )
 
 
+def evaluate_speaker_similarity(config: OmniSeedttsBenchmarkConfig) -> dict:
+    """Compute speaker similarity for saved SeedTTS audio."""
+    similarity_config = {
+        "model": config.model,
+        "speaker": config.speaker,
+        "voice_clone": config.voice_clone,
+        "meta": config.meta,
+        "max_samples": config.max_samples,
+        "similarity_model": config.similarity_model,
+        "similarity_device": config.similarity_device or config.device,
+    }
+    return run_seedtts_similarity(
+        config,
+        similarity_config=similarity_config,
+        log_per_sample=True,
+    )
+
+
 def _config_from_args(args: argparse.Namespace) -> OmniSeedttsBenchmarkConfig:
     # ``--no-ref-audio`` is kept as a legacy alias so existing automation and
     # shell history keep working after the script merge.  ``--voice-clone``
@@ -365,6 +396,9 @@ def _config_from_args(args: argparse.Namespace) -> OmniSeedttsBenchmarkConfig:
         request_rate=args.request_rate,
         disable_tqdm=args.disable_tqdm,
         device=device,
+        similarity=args.similarity,
+        similarity_model=args.similarity_model,
+        similarity_device=args.similarity_device,
     )
 
 
@@ -473,6 +507,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Legacy alias for --device (ASR transcription device).",
     )
     parser.add_argument(
+        "--similarity",
+        action="store_true",
+        help="Also compute prompt-vs-generated speaker similarity.",
+    )
+    parser.add_argument(
+        "--similarity-model",
+        type=str,
+        default=DEFAULT_SPEAKER_SIMILARITY_MODEL,
+        help="Transformers WavLM x-vector model name or local path.",
+    )
+    parser.add_argument(
+        "--similarity-device",
+        type=str,
+        default=None,
+        help="Device for speaker similarity model. Defaults to --device.",
+    )
+    parser.add_argument(
         "--server-timeout",
         type=int,
         default=1200,
@@ -490,6 +541,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only run ASR transcription and WER on existing output-dir.",
     )
+    mode.add_argument(
+        "--similarity-only",
+        action="store_true",
+        help="Only run speaker similarity on existing output-dir.",
+    )
     return parser
 
 
@@ -501,8 +557,14 @@ def main() -> None:
     if args.save_audio:
         logger.info("--save-audio is a no-op: the unified benchmark always saves WAVs.")
 
+    if args.similarity_only:
+        evaluate_speaker_similarity(config)
+        return
+
     if args.transcribe_only:
         evaluate_generated_audio(config)
+        if config.similarity:
+            evaluate_speaker_similarity(config)
         return
 
     wait_for_service(build_base_url(config), timeout=args.server_timeout)
@@ -523,6 +585,9 @@ def main() -> None:
             "wer": accuracy_results["wer_summary"],
         },
     }
+    if config.similarity:
+        similarity_results = evaluate_speaker_similarity(config)
+        combined["accuracy"]["speaker_similarity"] = similarity_results["summary"]
     save_json_results(combined, config.output_dir, "eval_results.json")
 
 

@@ -26,7 +26,6 @@ import aiohttp
 import soundfile as sf
 import torch
 import transformers
-from jiwer import process_words
 from tqdm import tqdm
 
 from benchmarks.benchmarker.data import RequestResult
@@ -40,8 +39,15 @@ from benchmarks.benchmarker.utils import (
     process_sse_line,
     save_json_results,
 )
-from benchmarks.dataset.seedtts import SampleInput
+from benchmarks.dataset.seedtts import SampleInput, load_seedtts_samples
 from benchmarks.metrics.performance import build_speed_results
+from benchmarks.metrics.speaker_similarity import (
+    SpeakerSimilarityOutput,
+    SpeakerSimilarityScorer,
+    WavLMSpeakerSimilarityScorer,
+    calculate_speaker_similarity_metrics,
+    print_speaker_similarity_summary,
+)
 from benchmarks.metrics.wer import (
     calculate_asr_speed_metrics,
     calculate_wer_metrics,
@@ -217,6 +223,8 @@ def transcribe_and_compute_wer(
     device: str,
 ) -> SampleOutput:
     """Transcribe audio and compute per-sample WER metrics."""
+    from jiwer import process_words
+
     try:
         hyp_text = transcribe(asr, wav_path, lang, device)
     except Exception as exc:
@@ -377,6 +385,17 @@ class SeedttsTranscribeConfig(Protocol):
     device: str
 
 
+class SeedttsSimilarityConfig(Protocol):
+    """Subset of config fields the SeedTTS speaker-similarity pass reads."""
+
+    model: str
+    output_dir: str
+    meta: str
+    device: str
+    similarity_model: str
+    similarity_device: str | None
+
+
 def build_base_url(config: ServerEndpointConfig) -> str:
     """Resolve the server base URL from an explicit override or host/port."""
     return config.base_url or f"http://{config.host}:{config.port}"
@@ -489,6 +508,166 @@ def run_seedtts_transcribe(
     return {
         "wer_summary": wer_metrics,
         "asr_speed": asr_metrics,
+        "per_sample": outputs,
+    }
+
+
+def _speaker_similarity_result_to_dict(output: SpeakerSimilarityOutput) -> dict:
+    return {
+        "id": output.sample_id,
+        "ref_audio": output.ref_audio or None,
+        "wav_path": output.wav_path or None,
+        "speaker_similarity": (
+            round(output.similarity, 6) if output.similarity is not None else None
+        ),
+        "audio_duration_s": round(output.audio_duration_s, 4),
+        "scorer_latency_s": round(output.scorer_latency_s, 4),
+        "is_success": output.is_success,
+        "error": output.error or None,
+    }
+
+
+def save_speaker_similarity_results(
+    outputs: list[SpeakerSimilarityOutput],
+    metrics: dict,
+    config: dict,
+    output_dir: str,
+) -> None:
+    json_results = {
+        "summary": metrics,
+        "config": config,
+        "per_sample": [
+            _speaker_similarity_result_to_dict(output) for output in outputs
+        ],
+    }
+    save_json_results(json_results, output_dir, "similarity_results.json")
+
+    csv_path = os.path.join(output_dir, "similarity_results.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "id",
+                "ref_audio",
+                "wav_path",
+                "speaker_similarity",
+                "audio_duration_s",
+                "scorer_latency_s",
+                "is_success",
+                "error",
+            ]
+        )
+        for output in outputs:
+            writer.writerow(
+                [
+                    output.sample_id,
+                    output.ref_audio,
+                    output.wav_path,
+                    (
+                        f"{output.similarity:.6f}"
+                        if output.similarity is not None
+                        else ""
+                    ),
+                    f"{output.audio_duration_s:.4f}",
+                    f"{output.scorer_latency_s:.4f}",
+                    output.is_success,
+                    output.error or "",
+                ]
+            )
+
+
+def _build_ref_audio_map(meta_path: str) -> dict[str, str]:
+    return {
+        sample.sample_id: sample.ref_audio for sample in load_seedtts_samples(meta_path)
+    }
+
+
+def _score_speaker_similarity_entry(
+    entry: dict,
+    ref_audio_by_id: dict[str, str],
+    scorer: SpeakerSimilarityScorer,
+) -> SpeakerSimilarityOutput:
+    output = SpeakerSimilarityOutput(
+        sample_id=entry["sample_id"],
+        ref_audio=entry.get("ref_audio") or ref_audio_by_id.get(entry["sample_id"], ""),
+        wav_path=entry.get("wav_path") or "",
+        audio_duration_s=entry.get("audio_duration_s", 0.0),
+    )
+    if not entry.get("is_success", False):
+        output.error = f"Generation failed: {entry.get('error', 'unknown')}"
+        return output
+    if not output.ref_audio:
+        output.error = "Reference audio not available"
+        return output
+    if not output.wav_path:
+        output.error = "Generated audio path not available"
+        return output
+    if not os.path.exists(output.ref_audio):
+        output.error = f"Reference audio not found: {output.ref_audio}"
+        return output
+    if not os.path.exists(output.wav_path):
+        output.error = f"Generated audio not found: {output.wav_path}"
+        return output
+
+    t0 = time.perf_counter()
+    try:
+        output.similarity = scorer.score(output.ref_audio, output.wav_path)
+        output.is_success = True
+    except Exception as exc:
+        output.error = f"Similarity failed: {exc}"
+        logger.error(f"[{output.sample_id}] {output.error}")
+    finally:
+        output.scorer_latency_s = time.perf_counter() - t0
+    return output
+
+
+def run_seedtts_similarity(
+    config: SeedttsSimilarityConfig,
+    *,
+    similarity_config: dict,
+    generation_mode: str | None = None,
+    log_per_sample: bool = False,
+    scorer: SpeakerSimilarityScorer | None = None,
+) -> dict:
+    """Compute reference-vs-generated speaker similarity for saved SeedTTS audio."""
+    generated_path = os.path.join(config.output_dir, "generated.json")
+    with open(generated_path) as f:
+        generated: list[dict] = json.load(f)
+    logger.info(f"Loaded {len(generated)} entries from {generated_path}")
+
+    ref_audio_by_id = _build_ref_audio_map(config.meta)
+    if scorer is None:
+        similarity_device = config.similarity_device or config.device
+        if "cuda" in similarity_device:
+            torch.cuda.set_device(similarity_device)
+            logger.info(f"Set speaker-similarity CUDA device to {similarity_device}")
+        scorer = WavLMSpeakerSimilarityScorer(
+            config.similarity_model,
+            device=similarity_device,
+        )
+
+    outputs = [
+        _score_speaker_similarity_entry(entry, ref_audio_by_id, scorer)
+        for entry in tqdm(generated, desc="Speaker similarity")
+    ]
+    if log_per_sample:
+        for output in outputs:
+            if output.is_success:
+                logger.info(
+                    f"[{output.sample_id}] similarity={output.similarity:.3f} "
+                    f"latency={output.scorer_latency_s:.3f}s"
+                )
+
+    metrics = calculate_speaker_similarity_metrics(outputs)
+    print_speaker_similarity_summary(metrics, config.model, generation_mode)
+    save_speaker_similarity_results(
+        outputs,
+        metrics,
+        similarity_config,
+        config.output_dir,
+    )
+    return {
+        "summary": metrics,
         "per_sample": outputs,
     }
 
@@ -1040,6 +1219,8 @@ def _request_result_to_generated_entry(
     entry: dict = {
         "sample_id": output.request_id,
         "target_text": sample.target_text,
+        "ref_text": sample.ref_text,
+        "ref_audio": sample.ref_audio,
         "wav_path": output.wav_path,
         "is_success": output.is_success,
         "latency_s": round(output.latency_s, 4),

@@ -25,12 +25,12 @@ python -m benchmarks.dataset.prepare --dataset seedtts
 
 # 1. Start a server on port 8000 (pick one matching the benchmark below)
 
-# S2-Pro — for sections 2a/2b/2c
+# S2-Pro — for sections 2a/2b/2c/2d
 python -m sglang_omni.cli serve \
     --model-path fishaudio/s2-pro \
     --config examples/configs/s2pro_tts.yaml --port 8000
 
-# Voxtral-4B-TTS — for section 2d (plain TTS, no voice cloning)
+# Voxtral-4B-TTS — for section 2e (plain TTS, no voice cloning)
 python -m sglang_omni.cli serve \
     --model-path mistralai/Voxtral-4B-TTS-2603 --port 8000
 
@@ -61,7 +61,14 @@ python -m benchmarks.eval.benchmark_tts_seedtts \
     --model fishaudio/s2-pro \
     --output-dir results/s2pro_en --lang en --device cuda:0
 
-# 2d. Voxtral — full pipeline without voice cloning
+# 2d. S2-Pro — speaker similarity only (reuses audio; no server)
+python -m benchmarks.eval.benchmark_tts_seedtts \
+    --similarity-only \
+    --meta seedtts_testset/en/meta.lst \
+    --model fishaudio/s2-pro \
+    --output-dir results/s2pro_en --similarity-device cuda:0
+
+# 2e. Voxtral — full pipeline without voice cloning
 python -m benchmarks.eval.benchmark_tts_seedtts \
     --meta seedtts_testset/en/meta.lst \
     --model mistralai/Voxtral-4B-TTS-2603 --port 8000 \
@@ -90,6 +97,13 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
     --meta seedtts_testset/en/meta.lst \
     --output-dir results/qwen3_omni_en \
     --model qwen3-omni --lang en --device cuda:0
+
+# 3d. Qwen3-Omni — speaker similarity only (reuses audio; no server)
+python -m benchmarks.eval.benchmark_omni_seedtts \
+    --similarity-only \
+    --meta seedtts_testset/en/meta.lst \
+    --output-dir results/qwen3_omni_en \
+    --model qwen3-omni --similarity-device cuda:0
 
 # 4. Qwen3-Omni — MMSU (audio comprehension)
 python -m benchmarks.eval.benchmark_omni_mmsu \
@@ -137,6 +151,10 @@ generates + persists WAVs while the server runs, phase 2 transcribes offline
 to avoid GPU contention with the server. Use `--generate-only` or
 `--transcribe-only` to run a single phase. For TTS, `--concurrency` and
 `--max-concurrency` are equivalent (see `benchmark_tts_seedtts.py`).
+Pass `--similarity` to add prompt-vs-generated speaker similarity after WER,
+or `--similarity-only` to score existing `generated.json` audio artifacts.
+Similarity defaults to the `microsoft/wavlm-base-plus-sv` WavLM x-vector model
+and writes `similarity_results.json` / `similarity_results.csv`.
 `benchmark_omni_seedtts.py` documents local vs CI GPU usage in its module
 docstring (sequential phases on CI to reduce OOM risk).
 

@@ -169,6 +169,7 @@ jobs:
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
+            */similarity_results.json
           artifact-upload-name: qwen3-omni-tts-results
           artifact-upload-path: /tmp/**/*_results.json
 

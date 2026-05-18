@@ -105,6 +105,7 @@ jobs:
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
+            */similarity_results.json
           artifact-upload-name: s2pro-stage-1-results
           artifact-upload-path: stage-results/nonstream
           artifact-if-no-files-found: error
@@ -146,6 +147,7 @@ jobs:
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
+            */similarity_results.json
           artifact-upload-name: s2pro-stage-2-results
           artifact-upload-path: stage-results/stream
           artifact-if-no-files-found: error

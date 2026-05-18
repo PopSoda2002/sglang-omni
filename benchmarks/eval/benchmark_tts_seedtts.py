@@ -57,6 +57,14 @@ Usage (CI):
         --output-dir results/s2pro_en \
         --lang en --device cuda:0
 
+    # Speaker similarity only
+    python -m benchmarks.eval.benchmark_tts_seedtts \
+        --similarity-only \
+        --meta seedtts_testset/en/meta.lst \
+        --model fishaudio/s2-pro \
+        --output-dir results/s2pro_en \
+        --similarity-device cuda:0
+
 
 H200 Full-Set Reference Results
 
@@ -124,9 +132,11 @@ from benchmarks.metrics.performance import (
     compute_speed_metrics,
     print_speed_summary,
 )
+from benchmarks.metrics.speaker_similarity import DEFAULT_SPEAKER_SIMILARITY_MODEL
 from benchmarks.tasks.tts import (
     build_base_url,
     make_tts_send_fn,
+    run_seedtts_similarity,
     run_seedtts_transcribe,
     save_generated_audio_metadata,
     save_speed_results,
@@ -170,6 +180,10 @@ class TtsSeedttsBenchmarkConfig:
     # Transcribe phase
     lang: str = "en"
     device: str = "cuda:0"
+    # Speaker-similarity phase
+    similarity: bool = False
+    similarity_model: str = DEFAULT_SPEAKER_SIMILARITY_MODEL
+    similarity_device: str | None = None
 
 
 def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
@@ -281,6 +295,26 @@ def run_tts_seedtts_transcribe(config: TtsSeedttsBenchmarkConfig) -> dict:
     )
 
 
+def run_tts_seedtts_similarity(config: TtsSeedttsBenchmarkConfig) -> dict:
+    """Compute speaker similarity for saved SeedTTS audio."""
+    generation_mode = "streaming" if config.stream else "non-streaming"
+    similarity_config = {
+        "model": config.model,
+        "meta": config.meta,
+        "voice_clone": config.voice_clone,
+        "voice": config.voice,
+        "max_samples": config.max_samples,
+        "stream": config.stream,
+        "similarity_model": config.similarity_model,
+        "similarity_device": config.similarity_device or config.device,
+    }
+    return run_seedtts_similarity(
+        config,
+        similarity_config=similarity_config,
+        generation_mode=generation_mode,
+    )
+
+
 def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
     # ``--no-ref-audio`` is preserved as a legacy CLI flag; it flips the
     # dataclass default (``voice_clone=True``) to False for plain TTS.
@@ -307,6 +341,9 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         disable_tqdm=args.disable_tqdm,
         lang=args.lang,
         device=args.device,
+        similarity=args.similarity,
+        similarity_model=args.similarity_model,
+        similarity_device=args.similarity_device,
     )
 
 
@@ -409,6 +446,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Device for ASR model (transcribe phase).",
     )
     parser.add_argument(
+        "--similarity",
+        action="store_true",
+        help="Also compute prompt-vs-generated speaker similarity.",
+    )
+    parser.add_argument(
+        "--similarity-model",
+        type=str,
+        default=DEFAULT_SPEAKER_SIMILARITY_MODEL,
+        help="Transformers WavLM x-vector model name or local path.",
+    )
+    parser.add_argument(
+        "--similarity-device",
+        type=str,
+        default=None,
+        help="Device for speaker similarity model. Defaults to --device.",
+    )
+    parser.add_argument(
         "--server-timeout",
         type=int,
         default=1200,
@@ -426,6 +480,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only run ASR transcription and WER on existing output-dir.",
     )
+    mode.add_argument(
+        "--similarity-only",
+        action="store_true",
+        help="Only run speaker similarity on existing output-dir.",
+    )
     return parser
 
 
@@ -437,8 +496,14 @@ def main() -> None:
     if args.save_audio:
         logger.info("--save-audio is a no-op: the unified benchmark always saves WAVs.")
 
+    if args.similarity_only:
+        run_tts_seedtts_similarity(config)
+        return
+
     if args.transcribe_only:
         run_tts_seedtts_transcribe(config)
+        if config.similarity:
+            run_tts_seedtts_similarity(config)
         return
 
     wait_for_service(build_base_url(config), timeout=args.server_timeout)
@@ -448,6 +513,8 @@ def main() -> None:
         return
 
     run_tts_seedtts_transcribe(config)
+    if config.similarity:
+        run_tts_seedtts_similarity(config)
 
 
 if __name__ == "__main__":
