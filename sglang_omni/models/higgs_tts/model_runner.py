@@ -110,9 +110,15 @@ class HiggsTTSModelRunner(ModelRunner):
             if req.is_chunked > 0 or slot is None or not slot.output_codes:
                 cb0_per_row.append(0)
                 continue
-            codes_N = slot.output_codes[-1]
-            data.output_codes.append(codes_N.detach().cpu().clone())
+            codes_N = slot.output_codes[-1].detach().cpu().clone()
+            data.output_codes.append(codes_N)
             data.generation_done = bool(slot.sampler.generation_done)
+            # Streaming hook: hand the freshly sampled delayed-code row to
+            # the scheduler so it can forward it to the vocoder. Shape
+            # ``[1, N]`` matches what the streaming vocoder expects per
+            # ``type="stream"`` message. Always replaced (not appended) so
+            # the scheduler can't double-emit a stale chunk.
+            data.latest_stream_code_chunk = codes_N.unsqueeze(0)
             cb0_per_row.append(int(codes_N[0].item()))
 
         result.next_token_ids = torch.tensor(

@@ -26,6 +26,11 @@ class HiggsSGLangRequestData(SGLangARRequestData):
     codebook_size: int = 1026
     output_codes: list[torch.Tensor] = field(default_factory=list)
     generation_done: bool = False
+    # Streaming: the model_runner writes the freshly sampled delayed-code row
+    # here every decode step; the scheduler reads it, emits a
+    # ``type="stream"`` message to the vocoder, and clears it. ``None``
+    # means "no new chunk this step" (e.g. chunked prefill, finished row).
+    latest_stream_code_chunk: torch.Tensor | None = None
 
 
 def _ref_audio_fingerprint(codes: list[list[int]] | None) -> str | None:

@@ -390,11 +390,45 @@ class HiggsScheduler:
                 continue
 
             self.iteration_controller.update_request(request, output.data)
-            if self.iteration_controller.is_finished(request, output.data):
+            is_done = self.iteration_controller.is_finished(request, output.data)
+            self._emit_stream_chunk(request)
+            if is_done:
+                # The pipeline runtime automatically emits a ``stream_done``
+                # to every configured ``stream_to`` target when we hand the
+                # final ``result`` to ``_route_result``. Just finish here.
                 self._finish_request(request)
                 finished.append(request)
 
         return finished
+
+    def _emit_stream_chunk(self, request: SchedulerRequest) -> None:
+        """If the request opted into streaming, forward this step's fresh
+        delayed-code row to the vocoder.
+
+        Modeled on ``fishaudio_s2_pro.fish_scheduler._emit_stream_chunk``.
+        Clears the field on the data object so the next step doesn't
+        accidentally re-emit a stale chunk if no new code lands.
+        """
+        if request.request_id in self._aborted_request_ids:
+            return
+        data = request.data
+        payload = getattr(data, "stage_payload", None)
+        if payload is None or not (payload.request.params or {}).get("stream"):
+            data.latest_stream_code_chunk = None
+            return
+        codes = data.latest_stream_code_chunk
+        if codes is None:
+            return
+        self.outbox.put(
+            OutgoingMessage(
+                request_id=request.request_id,
+                type="stream",
+                data=codes,
+                target="vocoder",
+                metadata={"modality": "audio_codes"},
+            )
+        )
+        data.latest_stream_code_chunk = None
 
     def _finish_request(self, request: SchedulerRequest) -> None:
         request.status = SchedulerStatus.FINISHED

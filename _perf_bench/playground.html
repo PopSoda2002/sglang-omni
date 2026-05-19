@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Higgs TTS — Streaming Playground</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #1a1f29;
+    --border: #2a2f3a;
+    --fg: #d8dee9;
+    --muted: #8a93a3;
+    --accent: #5cc8ff;
+    --good: #98c379;
+    --warn: #e5c07b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Mono", "Menlo", monospace;
+    margin: 0; padding: 24px;
+    max-width: 920px; margin-left: auto; margin-right: auto;
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; flex: 1 1 0; min-width: 280px;
+  }
+  label { display: block; color: var(--muted); margin-bottom: 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  input[type=text], input[type=number], textarea {
+    background: #0b0e13; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px 10px; font: inherit; width: 100%;
+  }
+  textarea { min-height: 96px; resize: vertical; }
+  .num-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .btn-row { display: flex; gap: 10px; margin-top: 12px; }
+  button {
+    background: var(--accent); color: #0b0e13; border: 0;
+    padding: 10px 18px; font: 600 14px/1 inherit; border-radius: 4px;
+    cursor: pointer;
+  }
+  button.secondary { background: #2a2f3a; color: var(--fg); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .stats {
+    background: #0b0e13; border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 12px; font-family: "SF Mono", monospace; font-size: 12px;
+    white-space: pre-wrap; overflow: auto; min-height: 90px; max-height: 240px;
+  }
+  .chunks {
+    display: flex; flex-direction: column; gap: 4px;
+    background: #0b0e13; border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 12px; font-family: "SF Mono", monospace; font-size: 12px;
+    max-height: 240px; overflow-y: auto;
+  }
+  .chunk { display: flex; gap: 14px; }
+  .chunk .idx { color: var(--muted); width: 32px; text-align: right; }
+  .chunk .audio { color: var(--good); width: 80px; text-align: right; }
+  .chunk .wall { color: var(--accent); width: 80px; text-align: right; }
+  .chunk .gap { color: var(--warn); width: 70px; text-align: right; }
+  .chunk .total { color: var(--fg); }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent); color: #0b0e13; font-weight: 700; font-size: 11px;
+  }
+  .ttfa { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .ttfa .unit { font-size: 14px; color: var(--muted); margin-left: 4px; }
+  audio { width: 100%; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Higgs TTS — Streaming Playground</h1>
+<p class="sub">POST <code>/v1/audio/speech?stream=true</code>, plays SSE chunks live via Web Audio, dumps per-chunk wall-clock + audio duration timings.</p>
+
+<div class="panel">
+  <div class="row">
+    <div style="flex: 2 1 0;">
+      <label>Text</label>
+      <textarea id="text">Hello world. This is a streaming test of the Higgs text-to-speech system, demonstrating dynamic frame accumulation for low time to first audio.</textarea>
+    </div>
+    <div style="flex: 1 1 0;">
+      <label>Server URL</label>
+      <input type="text" id="url" value="http://localhost:8101">
+    </div>
+  </div>
+  <div class="num-grid">
+    <div><label>temperature</label><input type="number" id="temperature" step="0.05" value="0.8"></div>
+    <div><label>top_k</label><input type="number" id="top_k" step="1" value="50"></div>
+    <div><label>max_new_tokens</label><input type="number" id="max_new_tokens" step="32" value="512"></div>
+    <div><label>seed</label><input type="number" id="seed" step="1" value="42"></div>
+  </div>
+  <div class="btn-row">
+    <button id="go">▶ Stream</button>
+    <button id="go-nonstream" class="secondary">≡ One-shot</button>
+    <button id="stop" class="secondary" disabled>■ Stop</button>
+    <button id="download" class="secondary" disabled>⬇ Download WAV</button>
+  </div>
+</div>
+
+<div class="row">
+  <div class="panel">
+    <label>Time to first audio</label>
+    <div class="ttfa"><span id="ttfa">—</span><span class="unit">ms</span></div>
+    <label style="margin-top: 12px;">Per-chunk timing</label>
+    <div class="chunks" id="chunks"></div>
+  </div>
+  <div class="panel">
+    <label>Summary</label>
+    <div class="stats" id="stats">(idle)</div>
+    <audio id="audio" controls></audio>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const els = {
+  text: $("text"), url: $("url"),
+  temperature: $("temperature"), top_k: $("top_k"),
+  max_new_tokens: $("max_new_tokens"), seed: $("seed"),
+  go: $("go"), goNon: $("go-nonstream"),
+  stop: $("stop"), download: $("download"),
+  ttfa: $("ttfa"), chunks: $("chunks"), stats: $("stats"),
+  audio: $("audio"),
+};
+
+let abortCtrl = null;
+let audioCtx = null;
+let lastDownloadBlob = null;
+
+function newAudioCtx() {
+  // Defer construction until user gesture (otherwise Chrome blocks autoplay).
+  if (audioCtx === null || audioCtx.state === "closed") {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  }
+  return audioCtx;
+}
+
+function resetUi() {
+  els.chunks.innerHTML = "";
+  els.ttfa.textContent = "—";
+  els.stats.textContent = "(running…)";
+  els.download.disabled = true;
+  lastDownloadBlob = null;
+}
+
+function logChunk(idx, audioMs, wallMs, totalAudioMs, gapMs) {
+  const div = document.createElement("div");
+  div.className = "chunk";
+  div.innerHTML =
+    `<span class="idx">#${idx}</span>` +
+    `<span class="audio">+${audioMs.toFixed(0)} ms</span>` +
+    `<span class="wall">@${wallMs.toFixed(0)} ms</span>` +
+    `<span class="gap">${gapMs != null ? "+" + gapMs.toFixed(0) + " ms" : ""}</span>` +
+    `<span class="total">total=${(totalAudioMs / 1000).toFixed(2)}s</span>`;
+  els.chunks.appendChild(div);
+}
+
+function setStats(text) { els.stats.textContent = text; }
+
+function buildPcmWav(samplesFloat32, sampleRate) {
+  // Build a minimal mono 16-bit PCM WAV file in memory.
+  const n = samplesFloat32.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const dv = new DataView(buf);
+  const ascii = (s, o) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  ascii("RIFF", 0); dv.setUint32(4, 36 + n * 2, true);
+  ascii("WAVE", 8); ascii("fmt ", 12); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true);     // PCM
+  dv.setUint16(22, 1, true);     // mono
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * 2, true);
+  dv.setUint16(32, 2, true);     // block align
+  dv.setUint16(34, 16, true);    // bits
+  ascii("data", 36); dv.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samplesFloat32[i]));
+    dv.setInt16(44 + i * 2, s * 32767, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+async function go(stream) {
+  if (abortCtrl) abortCtrl.abort();
+  abortCtrl = new AbortController();
+  els.go.disabled = true; els.goNon.disabled = true;
+  els.stop.disabled = false;
+  resetUi();
+  const ctx = newAudioCtx();
+  if (ctx.state === "suspended") await ctx.resume();
+
+  const body = {
+    input: els.text.value,
+    stream: stream,
+    response_format: "pcm",
+    max_new_tokens: parseInt(els.max_new_tokens.value, 10),
+    temperature: parseFloat(els.temperature.value),
+    top_k: parseInt(els.top_k.value, 10),
+    seed: parseInt(els.seed.value, 10),
+  };
+
+  const t0 = performance.now();
+  let ttfa = null;
+  let chunkIdx = 0;
+  let totalSamples = 0;
+  let lastChunkWall = null;
+  let scheduleHead = ctx.currentTime + 0.05; // tiny lead so first chunk doesn't underrun
+  let allSamples = [];
+  let sampleRate = 24000;
+
+  try {
+    if (stream) {
+      const r = await fetch(`${els.url.value}/v1/audio/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: abortCtrl.signal,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n\n")) >= 0) {
+          const chunk = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 2);
+          if (!chunk.startsWith("data: ")) continue;
+          const payload = chunk.slice("data: ".length).trim();
+          if (payload === "[DONE]") continue;
+          const msg = JSON.parse(payload);
+          const audioObj = msg.audio;
+          if (!audioObj || !audioObj.data) continue;
+          sampleRate = audioObj.sample_rate || sampleRate;
+          const bytes = Uint8Array.from(atob(audioObj.data), c => c.charCodeAt(0));
+          const i16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+          const f32 = new Float32Array(i16.length);
+          for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+          allSamples.push(f32);
+
+          const audioBuf = ctx.createBuffer(1, f32.length, sampleRate);
+          audioBuf.getChannelData(0).set(f32);
+          const src = ctx.createBufferSource();
+          src.buffer = audioBuf;
+          src.connect(ctx.destination);
+          const startAt = Math.max(scheduleHead, ctx.currentTime + 0.005);
+          src.start(startAt);
+          scheduleHead = startAt + audioBuf.duration;
+
+          const nowMs = performance.now() - t0;
+          const audioMs = (f32.length / sampleRate) * 1000;
+          totalSamples += f32.length;
+          if (ttfa === null) {
+            ttfa = nowMs;
+            els.ttfa.textContent = nowMs.toFixed(0);
+          }
+          const gap = lastChunkWall == null ? null : nowMs - lastChunkWall;
+          lastChunkWall = nowMs;
+          logChunk(chunkIdx++, audioMs, nowMs, (totalSamples / sampleRate) * 1000, gap);
+        }
+      }
+    } else {
+      const r = await fetch(`${els.url.value}/v1/audio/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, stream: false, response_format: "wav" }),
+        signal: abortCtrl.signal,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      const wavBytes = await r.arrayBuffer();
+      ttfa = performance.now() - t0;
+      els.ttfa.textContent = ttfa.toFixed(0);
+      const audioBuf = await ctx.decodeAudioData(wavBytes.slice(0));
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+      src.start();
+      totalSamples = audioBuf.length;
+      sampleRate = audioBuf.sampleRate;
+      const f32 = audioBuf.getChannelData(0);
+      allSamples.push(new Float32Array(f32));
+      logChunk(0, audioBuf.duration * 1000, ttfa, audioBuf.duration * 1000, null);
+    }
+  } catch (e) {
+    if (e.name === "AbortError") {
+      setStats("(aborted)");
+      return;
+    }
+    setStats(`ERROR: ${e.message}`);
+    return;
+  } finally {
+    els.go.disabled = false; els.goNon.disabled = false;
+    els.stop.disabled = true;
+    abortCtrl = null;
+  }
+
+  const total = performance.now() - t0;
+  const totalAudioSec = totalSamples / sampleRate;
+  setStats(
+    `mode:        ${stream ? "streaming (SSE)" : "one-shot WAV"}\n` +
+    `chunks:      ${chunkIdx || 1}\n` +
+    `total wall:  ${total.toFixed(0)} ms\n` +
+    `total audio: ${totalAudioSec.toFixed(2)} s\n` +
+    `RTF:         ${(total / 1000 / Math.max(totalAudioSec, 1e-6)).toFixed(3)}\n` +
+    `TTFA:        ${(ttfa ?? 0).toFixed(0)} ms\n` +
+    `sample_rate: ${sampleRate} Hz`
+  );
+
+  // Build a single WAV from the concatenated samples for the player + download.
+  const flat = new Float32Array(totalSamples);
+  let off = 0;
+  for (const s of allSamples) { flat.set(s, off); off += s.length; }
+  lastDownloadBlob = buildPcmWav(flat, sampleRate);
+  els.audio.src = URL.createObjectURL(lastDownloadBlob);
+  els.download.disabled = false;
+}
+
+els.go.addEventListener("click", () => go(true));
+els.goNon.addEventListener("click", () => go(false));
+els.stop.addEventListener("click", () => { if (abortCtrl) abortCtrl.abort(); });
+els.download.addEventListener("click", () => {
+  if (!lastDownloadBlob) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(lastDownloadBlob);
+  a.download = "higgs_tts.wav";
+  a.click();
+});
+</script>
+</body>
+</html>

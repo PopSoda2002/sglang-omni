@@ -240,7 +240,9 @@ def create_sglang_tts_engine_executor(
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
     overrides: dict[str, Any] = {
-        # Per-request slot state + Python decode loop are not graph-capturable.
+        # Per-request slot state + Python decode loop are not graph-capturable
+        # on this branch. (The CUDA Graph capture path lives on a separate
+        # PR; once that lands, this can flip to ``False`` independently.)
         "disable_cuda_graph": True,
         "mem_fraction_static": 0.85,
         "max_running_requests": 16,
@@ -301,14 +303,44 @@ def create_vocoder_executor(
     dtype: str = "bfloat16",
     max_batch_size: int = 4,
     max_batch_wait_ms: int = 2,
+    streaming: bool = False,
+    stream_stride: int = 10,
+    stream_followup_stride: int = 40,
+    stream_overlap_frames: int = 0,
+    stream_crossfade_samples: int = 0,
+    num_codebooks: int = 8,
 ):
     """Decode Higgs delayed codes to a mono 24 kHz waveform.
 
     Codec weights are extracted from the TTS checkpoint itself.
+
+    When ``streaming=True`` returns a :class:`HiggsStreamingVocoderScheduler`
+    that accepts both ``type="new_request"`` (one-shot path, parity with
+    the non-streaming default) and ``type="stream"`` / ``type="stream_done"``
+    messages emitted by :class:`HiggsScheduler` during AR decode. The
+    default values for ``stream_stride`` etc. come from the Stage 0
+    codec-chunkability probe (see ``docs/dev/higgs_tts/streaming_plan.md``).
     """
     checkpoint_dir = resolve_checkpoint(model_path)
     codec = get_or_load_codec(checkpoint_dir, device, dtype)
     sample_rate = HiggsAudioCodec.SAMPLE_RATE
+
+    if streaming:
+        from sglang_omni.models.higgs_tts.streaming_vocoder import (
+            HiggsStreamingVocoderScheduler,
+        )
+
+        return HiggsStreamingVocoderScheduler(
+            codec,
+            device=device,
+            num_codebooks=num_codebooks,
+            stream_stride=stream_stride,
+            stream_followup_stride=stream_followup_stride,
+            stream_overlap_frames=stream_overlap_frames,
+            stream_crossfade_samples=stream_crossfade_samples,
+            max_batch_size=max_batch_size,
+            max_batch_wait_ms=max_batch_wait_ms,
+        )
 
     def _vocode(payload: StagePayload) -> StagePayload:
         state = HiggsTtsState.from_dict(payload.data)
