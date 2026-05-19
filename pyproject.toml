@@ -52,6 +52,8 @@ dependencies = [
     "jiwer",
     "scipy>=1.10.0",
     "openai-whisper==20250625",
+    # Multilingual TTS WER: Omnilingual text normalization (diacritic removal).
+    "unidecode>=1.3",
     # S2-Pro
     "tiktoken",
     "hydra-core",

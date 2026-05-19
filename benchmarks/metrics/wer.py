@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import functools
+import importlib.util
+import os
+import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,6 +16,154 @@ from benchmarks.metrics._format import SPEED_LABEL_WIDTH, SPEED_LINE_WIDTH
 
 if TYPE_CHECKING:
     from benchmarks.tasks.tts import SampleOutput
+
+# ---------------------------------------------------------------------------
+# Omnilingual text normalization — shared with higgs_multilingual WER.
+# Reference: https://github.com/facebookresearch/omnilingual-asr/
+# ---------------------------------------------------------------------------
+
+_NORM_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "resources", "omni", "norm_config_module.py",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _omni_norm_config() -> dict:
+    spec = importlib.util.spec_from_file_location(
+        "_omni_norm_config", _NORM_CONFIG_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.norm_config
+
+
+def text_normalize(
+    text: str,
+    iso_code: str,
+    lower_case: bool = True,
+    remove_numbers: bool = True,
+    remove_brackets: bool = False,
+) -> str:
+    """Per-language text normalization used by Omnilingual ASR scoring."""
+    norm_config = _omni_norm_config()
+    config = norm_config.get(iso_code, norm_config["*"])
+
+    for field in [
+        "lower_case", "punc_set", "del_set", "mapping", "digit_set", "unicode_norm",
+    ]:
+        if field not in config:
+            config[field] = norm_config["*"][field]
+
+    text = unicodedata.normalize(config["unicode_norm"], text)
+
+    if config["lower_case"] and lower_case:
+        text = text.lower()
+
+    text = re.sub(r"\([^\)]*\d[^\)]*\)", " ", text)
+    if remove_brackets:
+        text = re.sub(r"\([^\)]*\)", " ", text)
+
+    for old, new in config["mapping"].items():
+        text = re.sub(old, new, text)
+
+    out = re.sub(r"[" + config["punc_set"] + "]", " ", text)
+    out = re.sub(r"[" + config["del_set"] + "]", "", out)
+
+    if remove_numbers:
+        digits = "[" + config["digit_set"] + "]+"
+        complete = (
+            r"^" + digits + r"(?=\s)|(?<=\s)"
+            + digits + r"(?=\s)|(?<=\s)"
+            + digits + "$"
+        )
+        out = re.sub(complete, " ", out)
+
+    if config["rm_diacritics"]:
+        from unidecode import unidecode
+        out = unidecode(out)
+
+    return re.sub(r"\s+", " ", out).strip()
+
+
+# ---------------------------------------------------------------------------
+# Higgs multilingual WER (CER for CJK) — per-sample WER on Omnilingual ASR
+# transcriptions. Reference:
+# https://github.com/k2-fsa/OmniVoice/blob/master/omnivoice/eval/wer/fleurs.py
+# ---------------------------------------------------------------------------
+
+_HIGGS_ML_LANG_TO_ISO3: dict[str, str] = {
+    # ISO-639-1, one-to-one with the ISO table.
+    "af": "afr", "am": "amh", "as": "asm", "ba": "bak", "be": "bel",
+    "bg": "bul", "bn": "ben", "ca": "cat", "cs": "ces", "cy": "cym",
+    "da": "dan", "de": "deu", "el": "ell", "en": "eng", "eo": "epo",
+    "es": "spa", "eu": "eus", "fi": "fin", "fr": "fra", "ga": "gle",
+    "gl": "glg", "gu": "guj", "ha": "hau", "he": "heb", "hi": "hin",
+    "hr": "hrv", "ht": "hat", "hu": "hun", "hy": "hye", "id": "ind",
+    "ig": "ibo", "is": "isl", "it": "ita", "ja": "jpn", "ka": "kat",
+    "kk": "kaz", "km": "khm", "kn": "kan", "ko": "kor", "ky": "kir",
+    "la": "lat", "lb": "ltz", "lg": "lug", "ln": "lin", "lo": "lao",
+    "lt": "lit", "mi": "mri", "mk": "mkd", "ml": "mal", "mr": "mar",
+    "mt": "mlt", "my": "mya", "nl": "nld", "ny": "nya", "oc": "oci",
+    "pa": "pan", "pl": "pol", "pt": "por", "ro": "ron", "ru": "rus",
+    "rw": "kin", "sd": "snd", "sk": "slk", "sl": "slv", "sn": "sna",
+    "so": "som", "sv": "swe", "ta": "tam", "te": "tel", "tg": "tgk",
+    "th": "tha", "tl": "tgl", "tr": "tur", "ug": "uig", "uk": "ukr",
+    "ur": "urd", "vi": "vie", "wo": "wol", "xh": "xho", "yo": "yor",
+    "zu": "zul",
+    # Macrolanguage -> canonical individual member.
+    "ar": "arb", "az": "azj", "et": "ekk", "fa": "pes", "ff": "ful",
+    "lv": "lvs", "mn": "khk", "ms": "zsm", "ne": "npi", "no": "nob",
+    "om": "orm", "ps": "pus", "sq": "sqi", "sw": "swh", "uz": "uzn",
+    "zh": "cmn",
+    # Already ISO-639-3 (passthrough).
+    "ast": "ast", "bs": "bos", "ceb": "ceb", "ckb": "ckb", "jw": "jav",
+    "kab": "kab", "kam": "kam", "kea": "kea", "luo": "luo", "mhr": "mhr",
+    "nso": "nso", "sr": "srp", "umb": "umb", "yue": "yue",
+}
+
+# Hangul is deliberately excluded so Korean keeps its spaces.
+_CJK_RANGE = r"一-鿿぀-ゟ゠-ヿ　-〿"
+_CJK_BETWEEN_RE = re.compile(f"([{_CJK_RANGE}])\\s+([{_CJK_RANGE}])")
+_CJK_TRAIL_RE = re.compile(f"([{_CJK_RANGE}])\\s+")
+_CJK_LEAD_RE = re.compile(f"\\s+([{_CJK_RANGE}])")
+_MULTI_SPACE_RE = re.compile(r"\s+")
+
+
+def _clean_cjk_spaces(text: str) -> str:
+    text = _CJK_BETWEEN_RE.sub(r"\1\2", text)
+    text = _CJK_BETWEEN_RE.sub(r"\1\2", text)
+    text = _CJK_TRAIL_RE.sub(r"\1", text)
+    text = _CJK_LEAD_RE.sub(r"\1", text)
+    return _MULTI_SPACE_RE.sub(" ", text).strip()
+
+
+def _higgs_multilingual_post_process(text: str, lang: str) -> str:
+    iso_639_3 = _HIGGS_ML_LANG_TO_ISO3.get(lang, lang)
+    text = text_normalize(
+        text,
+        iso_code=iso_639_3,
+        lower_case=True,
+        remove_numbers=False,
+        remove_brackets=False,
+    )
+    text = _clean_cjk_spaces(text)
+    text = text.replace(" ", "|")
+    return " ".join(list(text))
+
+
+def calculate_wer_higgs_multilingual(ref: str, hyp: str, lang: str):
+    """Per-sample multilingual WER. Returns a ``jiwer`` WordOutput-like object.
+
+    Postprocesses both strings with the Omnilingual normalizer + CJK space
+    cleanup, splits on character boundaries (so CJK becomes char-level
+    "CER"), then runs ``jiwer.process_words``.
+    """
+    import jiwer
+
+    ref_n = _higgs_multilingual_post_process(ref, lang)
+    hyp_n = _higgs_multilingual_post_process(hyp, lang)
+    return jiwer.process_words(ref_n, hyp_n), ref_n, hyp_n
 
 
 def calculate_wer_metrics(outputs: list["SampleOutput"], lang: str) -> dict:

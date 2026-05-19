@@ -7,6 +7,10 @@ Usage:
     python -m benchmarks.dataset.prepare --dataset seedtts-mini
     python -m benchmarks.dataset.prepare --dataset seedtts-50
 
+    # FLEURS-multilingual 102-language testset for higgs multilingual TTS WER.
+    # Downloads + extracts into ./fleurs_multilingual_eval by default.
+    python -m benchmarks.dataset.prepare --dataset fleurs-multilingual
+
     # MMMU / MMSU / Video-MME / Video-AMME (pre-warm the HuggingFace datasets cache)
     python -m benchmarks.dataset.prepare --dataset mmmu
     python -m benchmarks.dataset.prepare --dataset mmmu-ci-50
@@ -23,6 +27,7 @@ import argparse
 import logging
 import os
 import subprocess
+import tarfile
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,7 @@ DATASETS: dict[str, str] = {
     "seedtts": "zhaochenyang20/seed-tts-eval",
     "seedtts-mini": "zhaochenyang20/seed-tts-eval-mini",
     "seedtts-50": "zhaochenyang20/seed-tts-eval-50",
+    "fleurs-multilingual": "k2-fsa/TTS_eval_datasets",
     "mmmu": "MMMU/MMMU",
     "mmmu-ci-50": "zhaochenyang20/mmmu-ci-50",
     "mmsu": "ddwang2000/MMSU",
@@ -44,9 +50,11 @@ _CLI_LOCAL_DIRS: dict[str, str] = {
     "seedtts": "seedtts_testset",
     "seedtts-mini": "seedtts_testset",
     "seedtts-50": "seedtts_testset",
+    "fleurs-multilingual": "fleurs_multilingual_eval",
 }
 
 _SEEDTTS_EXISTENCE_MARKER = "en/meta.lst"
+_FLEURS_MARKER = "fleurs_multilingual_102/download/tts_eval_datasets/fleurs_multilingual_102/prompt"
 
 
 def download_dataset(
@@ -92,6 +100,40 @@ def download_dataset(
         logger.info(f"Dataset {repo_id} ready.")
 
 
+def _extract_tarball(tarball_path: str, dest_dir: str) -> None:
+    """Extract ``tarball_path`` into ``dest_dir`` if not already extracted."""
+    os.makedirs(dest_dir, exist_ok=True)
+    logger.info(f"Extracting {tarball_path} -> {dest_dir} ...")
+    with tarfile.open(tarball_path, "r:gz") as tar:
+        tar.extractall(dest_dir)
+
+
+def _prepare_fleurs_multilingual(local_dir: str) -> None:
+    """Download + extract k2-fsa/TTS_eval_datasets fleurs_multilingual_102."""
+    marker = os.path.join(local_dir, _FLEURS_MARKER)
+    if os.path.isdir(marker):
+        logger.info(f"fleurs_multilingual_102 already prepared at {local_dir}")
+        return
+
+    # The HF repo is sizeable; only pull the multilingual subset we need.
+    cmd = [
+        "huggingface-cli", "download",
+        "k2-fsa/TTS_eval_datasets",
+        "--repo-type", "dataset",
+        "--local-dir", local_dir,
+        "--include",
+        "fleurs_multilingual_102.jsonl",
+        "fleurs_multilingual_102.tar.gz",
+    ]
+    logger.info("Downloading k2-fsa/TTS_eval_datasets (fleurs_multilingual_102 only) ...")
+    subprocess.run(cmd, check=True)
+
+    tarball = os.path.join(local_dir, "fleurs_multilingual_102.tar.gz")
+    dest = os.path.join(local_dir, "fleurs_multilingual_102")
+    _extract_tarball(tarball, dest)
+    logger.info(f"fleurs_multilingual_102 ready at {local_dir}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download benchmark datasets.")
     parser.add_argument(
@@ -110,9 +152,14 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO)
 
-    repo_id = DATASETS[args.dataset]
     default_local_dir = _CLI_LOCAL_DIRS.get(args.dataset)
     local_dir = args.local_dir or default_local_dir
+
+    if args.dataset == "fleurs-multilingual":
+        _prepare_fleurs_multilingual(local_dir)
+        return
+
+    repo_id = DATASETS[args.dataset]
     existence_marker = (
         _SEEDTTS_EXISTENCE_MARKER if args.dataset in _CLI_LOCAL_DIRS else None
     )
