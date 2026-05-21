@@ -39,7 +39,6 @@ from benchmarks.eval.benchmark_tts_seedtts import (
     TtsSeedttsBenchmarkConfig,
     run_tts_seedtts_benchmark,
 )
-from benchmarks.tasks.tts import DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
 from tests.test_model.conftest import (
     S2PRO_STAGE_CONSISTENCY,
     S2PRO_STAGE_NONSTREAM,
@@ -74,6 +73,9 @@ BENCHMARK_TIMEOUT = 600
 WER_TIMEOUT = 600
 SIMILARITY_TIMEOUT = 600
 DATASET_CACHE_ENV = "SGLANG_SEEDTTS50_DIR"
+# Optional user override: a path to a custom fine-tuned WavLM checkpoint.
+# When unset, the bootstrapper in benchmarks.metrics.speaker_similarity_assets
+# auto-downloads the official weights into the shared cache directory.
 SIMILARITY_CHECKPOINT_ENV = "SEEDTTS_SIM_CHECKPOINT"
 S2PRO_STAGE_OUTPUT_ROOT_ENV = "S2PRO_STAGE_OUTPUT_ROOT"
 S2PRO_STAGE1_SPEED_RESULTS_DIR_ENV = "S2PRO_STAGE1_SPEED_RESULTS_DIR"
@@ -102,6 +104,12 @@ VC_WER_MAX_PER_SAMPLE = 0.17
 VC_STREAM_WER_MAX_CORPUS = 0.010610079575596816
 VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(VC_STREAM_WER_MAX_CORPUS)
 VC_STREAM_WER_MAX_PER_SAMPLE = 0.14285714285714285
+# TODO(PR #469, @zhaochenyang20 review): the 60.0 floor below is a placeholder
+# and has not yet been derived from worst-of-five independent runs as project
+# convention requires. The follow-up calibration (5x S2-Pro + 5x Qwen3-Omni
+# SIM on the same SeedTTS-50 EN subset with identical scorer version) is
+# tracked outside this PR; once the worst-of-five numbers land, reset this
+# threshold from the lowest of the five with the standard slack margin.
 VC_SIMILARITY_MEAN_MIN = 60.0
 
 # Note (Chenyang): Only thresholds for the CI concurrency are dedicatedly tuned,
@@ -240,7 +248,7 @@ def _run_wer_transcribe(
 def _run_similarity(
     meta_path: str,
     output_dir: str,
-    checkpoint_path: str,
+    checkpoint_path: str | None,
     *,
     device: str = "cuda:0",
 ) -> dict:
@@ -258,9 +266,9 @@ def _run_similarity(
         S2PRO_MODEL_PATH,
         "--device",
         device,
-        "--similarity-checkpoint",
-        checkpoint_path,
     ]
+    if checkpoint_path is not None:
+        cmd += ["--similarity-checkpoint", checkpoint_path]
 
     env = no_proxy_env()
     existing_pp = env.get("PYTHONPATH", "")
@@ -465,12 +473,13 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def similarity_checkpoint() -> str:
-    checkpoint = Path(
-        os.environ.get(SIMILARITY_CHECKPOINT_ENV, DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT)
-    ).expanduser()
-    assert checkpoint.exists(), f"Similarity checkpoint not found: {checkpoint}"
-    return str(checkpoint)
+def similarity_checkpoint() -> str | None:
+    """User-specified WavLM checkpoint override, or None to let the bootstrapper
+    auto-resolve the default weights from the shared cache directory."""
+    raw = os.environ.get(SIMILARITY_CHECKPOINT_ENV)
+    if not raw:
+        return None
+    return str(Path(raw).expanduser())
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -660,7 +669,7 @@ def test_voice_cloning_wer(
 def test_voice_cloning_similarity(
     wer_input_dirs: dict[str, dict[int, str]],
     dataset_dir: Path,
-    similarity_checkpoint: str,
+    similarity_checkpoint: str | None,
     selected_s2pro_tts_concurrencies: tuple[int, ...],
 ) -> None:
     for concurrency in selected_s2pro_tts_concurrencies:

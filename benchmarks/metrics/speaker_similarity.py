@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import importlib
-import os
-import sys
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
@@ -252,11 +250,13 @@ class WavLMSpeakerSimilarity:
     def __init__(
         self,
         *,
-        checkpoint_path: str,
+        finetune_checkpoint: str | Path,
+        wavlm_base: str | Path,
         device: str,
     ):
-        self.model = ECAPATDNNWavLM(feature_extract=load_wavlm(checkpoint_path))
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        finetune_checkpoint = str(finetune_checkpoint)
+        self.model = ECAPATDNNWavLM(feature_extract=load_wavlm(wavlm_base))
+        state_dict = torch.load(finetune_checkpoint, map_location="cpu")
         self.model.load_state_dict(state_dict["model"], strict=False)
         self.model.to(device)
         self.model.eval()
@@ -292,9 +292,8 @@ def load_audio(audio_path: str) -> torch.Tensor:
     return torch.from_numpy(np.asarray(audio, dtype=np.float32))
 
 
-def load_wavlm(checkpoint_path: str):
-    checkpoint_dir = os.path.dirname(os.path.abspath(checkpoint_path))
-    s3prl_root = os.path.join(checkpoint_dir, "s3prl")
-    sys.path.insert(0, os.path.join(s3prl_root, "s3prl_s3prl_main"))
-    hubconf = importlib.import_module("s3prl.upstream.wavlm.hubconf")
-    return hubconf.wavlm_local(ckpt=os.path.join(s3prl_root, "wavlm_large.pt"))
+def load_wavlm(wavlm_base: str | Path):
+    """Instantiate the WavLM upstream from the pip-installed s3prl package."""
+    from s3prl.upstream.wavlm.hubconf import wavlm_local
+
+    return wavlm_local(ckpt=str(wavlm_base))

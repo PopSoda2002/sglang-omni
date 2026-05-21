@@ -25,7 +25,6 @@ from benchmarks.eval.benchmark_omni_seedtts import (
 )
 from benchmarks.metrics.performance import print_speed_summary
 from benchmarks.metrics.wer import print_wer_summary
-from benchmarks.tasks.tts import DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
 from tests.test_model.omni_router_utils import (
     ManagedRouterHandle,
     assert_workers_served_requests,
@@ -49,6 +48,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONCURRENCY = 16
 MAX_SAMPLES = 50
 DATASET_CACHE_ENV = "SGLANG_SEEDTTS50_DIR"
+# Optional user override: a path to a custom fine-tuned WavLM checkpoint.
+# When unset, the bootstrapper in benchmarks.metrics.speaker_similarity_assets
+# auto-downloads the official weights into the shared cache directory.
 SIMILARITY_CHECKPOINT_ENV = "SEEDTTS_SIM_CHECKPOINT"
 
 WER_TIMEOUT = 600
@@ -57,8 +59,13 @@ SIMILARITY_TIMEOUT = 600
 VC_WER_BELOW_50_CORPUS_MAX = 0.014184397163120567
 VC_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(VC_WER_BELOW_50_CORPUS_MAX)
 VC_N_ABOVE_50_MAX = 0
-# Mirrors VC_SIMILARITY_MEAN_MIN in test_s2pro_tts_ci.py (PR #469).
-# Placeholder pending Qwen3-Omni dry-run calibration.
+# TODO(PR #469, @zhaochenyang20 review): the 60.0 floor mirrors the S2-Pro
+# placeholder and has not yet been derived from worst-of-five independent
+# runs as project convention requires. The follow-up calibration (5x
+# Qwen3-Omni SIM on the same SeedTTS-50 EN subset with identical scorer
+# version) is tracked outside this PR. Note also that the hard assertion
+# against this constant is currently disabled in test_voice_cloning_similarity
+# below pending upstream issue #483 — see the docstring there.
 VC_SIMILARITY_MEAN_MIN = 60.0
 
 # Note (Chenyang): The thresholds for the throughput_qps of tests/test_model/test_qwen3_omni_tts_ci.py
@@ -182,7 +189,7 @@ def _run_wer_transcribe(
 def _run_similarity(
     meta_path: str,
     output_dir: str,
-    checkpoint_path: str,
+    checkpoint_path: str | None,
     *,
     device: str = "cuda:0",
 ) -> dict:
@@ -200,9 +207,9 @@ def _run_similarity(
         "qwen3-omni",
         "--device",
         device,
-        "--similarity-checkpoint",
-        checkpoint_path,
     ]
+    if checkpoint_path is not None:
+        cmd += ["--similarity-checkpoint", checkpoint_path]
 
     env = no_proxy_env()
     existing = env.get("PYTHONPATH", "")
@@ -261,12 +268,13 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def similarity_checkpoint() -> str:
-    checkpoint = Path(
-        os.environ.get(SIMILARITY_CHECKPOINT_ENV, DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT)
-    ).expanduser()
-    assert checkpoint.exists(), f"Similarity checkpoint not found: {checkpoint}"
-    return str(checkpoint)
+def similarity_checkpoint() -> str | None:
+    """User-specified WavLM checkpoint override, or None to let the bootstrapper
+    auto-resolve the default weights from the shared cache directory."""
+    raw = os.environ.get(SIMILARITY_CHECKPOINT_ENV)
+    if not raw:
+        return None
+    return str(Path(raw).expanduser())
 
 
 @dataclass
@@ -386,7 +394,7 @@ def test_voice_cloning_wer(
 def test_voice_cloning_similarity(
     wer_audio_dir: str,
     dataset_dir: Path,
-    similarity_checkpoint: str,
+    similarity_checkpoint: str | None,
 ) -> None:
     """Speaker similarity for Qwen3-Omni voice-clone output.
 

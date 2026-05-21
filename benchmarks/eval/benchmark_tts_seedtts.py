@@ -133,7 +133,6 @@ from benchmarks.metrics.performance import (
     print_speed_summary,
 )
 from benchmarks.tasks.tts import (
-    DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
     build_base_url,
     make_tts_send_fn,
     run_seedtts_similarity,
@@ -180,7 +179,7 @@ class TtsSeedttsBenchmarkConfig:
     # Transcribe phase
     lang: str = "en"
     device: str = "cuda:0"
-    similarity_checkpoint: str = DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
+    similarity_checkpoint: str | None = None
 
 
 def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
@@ -423,8 +422,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--similarity-checkpoint",
         type=str,
-        default=DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
-        help="Path to wavlm_large_finetune.pth for SeedTTS speaker similarity.",
+        default=None,
+        help="Optional path to a custom fine-tuned WavLM checkpoint. "
+        "If omitted, the official weights are downloaded into a local cache "
+        "directory (override the cache root with SEEDTTS_SIM_CACHE_DIR).",
     )
     parser.add_argument(
         "--server-timeout",

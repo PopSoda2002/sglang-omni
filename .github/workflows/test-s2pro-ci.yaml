@@ -84,41 +84,14 @@ jobs:
         with:
           venv-name: omni-s2pro
 
-      - name: Prepare speaker similarity assets (cached on self-hosted runner)
+      - name: Prepare speaker similarity assets
         shell: bash
         run: |
-          # Persistent self-hosted-runner cache, same pattern as venv / dataset
-          # cache under /github/home/* used elsewhere in this workflow.
-          SIM_ROOT=/github/home/seedtts-wavlm-sim
-          MARKER="${SIM_ROOT}/.complete"
-
-          if [ -f "${MARKER}" ]; then
-            echo "[sim-assets] cache HIT at ${SIM_ROOT}"
-            ls -lh "${SIM_ROOT}/wavlm_large_finetune.pth" \
-                   "${SIM_ROOT}/s3prl/wavlm_large.pt"
-            exit 0
-          fi
-
-          echo "[sim-assets] cache MISS — fetching (~2.5 GB, one-time)"
           source omni-s2pro/bin/activate
-          mkdir -p "${SIM_ROOT}/s3prl"
-
-          if [ ! -f "${SIM_ROOT}/wavlm_large_finetune.pth" ]; then
-            huggingface-cli download popsoda2002/seedtts-wavlm-sim wavlm_large_finetune.pth --local-dir "${SIM_ROOT}"
-          fi
-          if [ ! -f "${SIM_ROOT}/s3prl/wavlm_large.pt" ]; then
-            huggingface-cli download s3prl/converted_ckpts wavlm_large.pt --local-dir "${SIM_ROOT}/s3prl"
-          fi
-          if [ ! -d "${SIM_ROOT}/s3prl/s3prl_s3prl_main" ]; then
-            git clone --depth 1 https://github.com/s3prl/s3prl "${SIM_ROOT}/s3prl/s3prl_s3prl_main"
-          fi
-
-          # Atomic completion marker — only set after all three assets land,
-          # so a partial / interrupted fetch is re-attempted on the next run.
-          touch "${MARKER}"
-          echo "[sim-assets] cached to ${SIM_ROOT}"
+          python -m benchmarks.metrics.speaker_similarity_assets --warm-cache
         env:
           HF_ENDPOINT: https://hf-mirror.com
+          SEEDTTS_SIM_CACHE_DIR: /github/home/seedtts-wavlm-sim
 
       - name: Run benchmark stage
         shell: bash
@@ -129,7 +102,7 @@ jobs:
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
-          SEEDTTS_SIM_CHECKPOINT: /github/home/seedtts-wavlm-sim/wavlm_large_finetune.pth
+          SEEDTTS_SIM_CACHE_DIR: /github/home/seedtts-wavlm-sim
           S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/nonstream
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
 

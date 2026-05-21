@@ -41,6 +41,9 @@ from benchmarks.benchmarker.utils import (
 from benchmarks.dataset.seedtts import SampleInput, load_seedtts_samples
 from benchmarks.metrics.performance import build_speed_results
 from benchmarks.metrics.speaker_similarity import WavLMSpeakerSimilarity
+from benchmarks.metrics.speaker_similarity_assets import (
+    ensure_speaker_similarity_assets,
+)
 from benchmarks.metrics.wer import (
     calculate_asr_speed_metrics,
     calculate_wer_metrics,
@@ -51,10 +54,6 @@ from benchmarks.metrics.wer import (
 logger = logging.getLogger(__name__)
 
 TEXT_PREVIEW_LENGTH = 60
-DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT = os.environ.get(
-    "SEEDTTS_SIM_CHECKPOINT",
-    "wavlm_large_finetune.pth",
-)
 SPEAKER_SIMILARITY_BATCH_SIZE = 8
 
 
@@ -327,8 +326,13 @@ def run_seedtts_similarity(
         torch.cuda.set_device(device)
         logger.info(f"Set speaker-similarity CUDA device to {device}")
 
+    override_checkpoint = getattr(config, "similarity_checkpoint", None)
+    assets = ensure_speaker_similarity_assets(
+        finetune_checkpoint_override=override_checkpoint,
+    )
     scorer = WavLMSpeakerSimilarity(
-        checkpoint_path=os.path.abspath(config.similarity_checkpoint),
+        finetune_checkpoint=assets.finetune_checkpoint,
+        wavlm_base=assets.wavlm_base,
         device=device,
     )
     rows = []
@@ -376,7 +380,7 @@ def run_seedtts_similarity(
                 "model": config.model,
                 "meta": config.meta,
                 "device": device,
-                "similarity_checkpoint": config.similarity_checkpoint,
+                "similarity_checkpoint": str(assets.finetune_checkpoint),
             },
             "per_sample": rows,
         },
