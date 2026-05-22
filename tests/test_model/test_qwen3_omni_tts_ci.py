@@ -419,10 +419,17 @@ def test_voice_cloning_similarity(
         similarity_checkpoint,
     )
     # Structural sanity only — quality gate disabled per docstring above.
+    # `skipped == 0` is a structural assertion (generation succeeded and WAVs
+    # are on disk), not a voice-quality gate, so it stays enabled even while
+    # #483 keeps the similarity-mean assertion soft.
+    summary = results.get("summary", {})
     assert (
-        results.get("summary", {}).get("speaker_similarity_mean") is not None
+        summary.get("speaker_similarity_mean") is not None
     ), "Missing speaker_similarity_mean in summary"
     assert results.get("per_sample"), "Expected per-sample speaker similarity results"
+    assert (
+        summary.get("skipped", 0) == 0
+    ), f"speaker similarity: {summary.get('skipped')} skipped samples ≠ 0"
 
 
 if __name__ == "__main__":

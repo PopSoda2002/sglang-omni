@@ -304,8 +304,11 @@ def _run_similarity(
 def _assert_similarity_results(results: dict, min_mean: float) -> None:
     summary = results["summary"]
     per_sample = results["per_sample"]
-    mean = summary["speaker_similarity_mean"]
     assert per_sample, "Expected per-sample speaker similarity results"
+    assert (
+        summary.get("skipped", 0) == 0
+    ), f"speaker similarity: {summary.get('skipped')} skipped samples ≠ 0"
+    mean = summary["speaker_similarity_mean"]
     assert (
         mean >= min_mean
     ), f"speaker_similarity_mean {mean:.4f} < threshold {min_mean:.4f}"
