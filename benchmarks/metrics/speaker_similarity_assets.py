@@ -177,6 +177,33 @@ def _validate_asset(
     return True, "ok"
 
 
+def _migrate_legacy_layout(cache_dir: Path) -> None:
+    """One-time migration of pre-flat layouts into the current flat cache.
+
+    PR #469's earlier CI shell block put ``wavlm_large.pt`` under
+    ``cache_dir/s3prl/`` so it could sit next to a git-cloned ``s3prl``
+    source tree. The bootstrapper now expects a flat layout — both HF
+    files sit directly in ``cache_dir``. On first run after this change
+    against an existing CI cache, move the legacy file into place so the
+    ~1.2 GB asset is *not* re-downloaded over a flaky proxy. No-op when
+    no legacy layout is present.
+    """
+    legacy = cache_dir / "s3prl" / _WAVLM_BASE_FILENAME
+    flat = cache_dir / _WAVLM_BASE_FILENAME
+    if not legacy.is_file() or flat.exists():
+        return
+    if legacy.stat().st_size < _MIN_ASSET_SIZE_BYTES:
+        return
+    logger.info("[sim-assets] migrating legacy %s -> %s", legacy, flat)
+    try:
+        legacy.rename(flat)
+    except OSError:
+        # Cross-filesystem rename — fall back to copy + unlink.
+        import shutil
+
+        shutil.move(str(legacy), str(flat))
+
+
 def _download_and_validate(
     repo_id: str,
     filename: str,
@@ -228,6 +255,7 @@ def ensure_speaker_similarity_assets(
     aside from a "cache HIT" log line and a few file ``stat`` calls.
     """
     cache_dir = _resolve_cache_dir(cache_dir)
+    _migrate_legacy_layout(cache_dir)
     marker = cache_dir / _MARKER_FILENAME
 
     # Which (filename, repo_id) tuples should this cache contain after the
