@@ -104,12 +104,12 @@ VC_WER_MAX_PER_SAMPLE = 0.17
 VC_STREAM_WER_MAX_CORPUS = 0.010610079575596816
 VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(VC_STREAM_WER_MAX_CORPUS)
 VC_STREAM_WER_MAX_PER_SAMPLE = 0.14285714285714285
-# TODO(PR #469, @zhaochenyang20 review): the 60.0 floor below is a placeholder
-# and has not yet been derived from worst-of-five independent runs as project
-# convention requires. The follow-up calibration (5x S2-Pro + 5x Qwen3-Omni
-# SIM on the same SeedTTS-50 EN subset with identical scorer version) is
-# tracked outside this PR; once the worst-of-five numbers land, reset this
-# threshold from the lowest of the five with the standard slack margin.
+# Calibrated per PR #469 review (item 5): worst-of-5 = 63.24, mean = 63.74,
+# stdev = 0.56 over 5 independent SeedTTS-50 EN runs on H200 (Spec GPU 4-7),
+# same scorer (popsoda2002/seedtts-wavlm-sim @ wavlm_large_finetune.pth).
+# All five comfortably above 60.0 (margin +5.4%) — current floor has
+# worst-of-5 support. See the "Speaker similarity calibration" section of
+# the PR description for the full per-run table.
 VC_SIMILARITY_MEAN_MIN = 60.0
 
 # Note (Chenyang): Only thresholds for the CI concurrency are dedicatedly tuned,

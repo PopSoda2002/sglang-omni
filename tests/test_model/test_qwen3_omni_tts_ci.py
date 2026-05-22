@@ -59,13 +59,16 @@ SIMILARITY_TIMEOUT = 600
 VC_WER_BELOW_50_CORPUS_MAX = 0.014184397163120567
 VC_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(VC_WER_BELOW_50_CORPUS_MAX)
 VC_N_ABOVE_50_MAX = 0
-# TODO(PR #469, @zhaochenyang20 review): the 60.0 floor mirrors the S2-Pro
-# placeholder and has not yet been derived from worst-of-five independent
-# runs as project convention requires. The follow-up calibration (5x
-# Qwen3-Omni SIM on the same SeedTTS-50 EN subset with identical scorer
-# version) is tracked outside this PR. Note also that the hard assertion
-# against this constant is currently disabled in test_voice_cloning_similarity
-# below pending upstream issue #483 — see the docstring there.
+# 60.0 mirrors the S2-Pro floor and is a placeholder until upstream issue
+# #483 is fixed; the hard assertion is currently disabled in
+# test_voice_cloning_similarity (see docstring there). PR #469 also collected
+# five Qwen3-Omni SeedTTS-50 EN runs for the record — all in the 2.90–3.48
+# range (worst = 2.90, stdev = 0.21), which confirms #483 deterministically
+# rather than producing a usable lower bound: no meaningful CI floor can be
+# derived from broken-state data. When #483 lands, re-run the five-shot
+# calibration with the fix and reset this constant from the lowest of the
+# five with the standard slack margin. See the "Speaker similarity
+# calibration" section of the PR description for the per-run numbers.
 VC_SIMILARITY_MEAN_MIN = 60.0
 
 # Note (Chenyang): The thresholds for the throughput_qps of tests/test_model/test_qwen3_omni_tts_ci.py
