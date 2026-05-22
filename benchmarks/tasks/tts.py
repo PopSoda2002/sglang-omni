@@ -305,8 +305,24 @@ def save_wer_results(
             )
 
 
+class SeedttsSimilarityConfig(Protocol):
+    """Subset of config fields the shared speaker-similarity pipeline reads.
+
+    Both :class:`OmniSeedttsBenchmarkConfig` and
+    :class:`TtsSeedttsBenchmarkConfig` satisfy this protocol via their
+    dataclass fields; entry-point parsers default ``similarity_checkpoint``
+    to ``None`` when the user does not pass ``--similarity-checkpoint``.
+    """
+
+    model: str
+    meta: str
+    output_dir: str
+    device: str
+    similarity_checkpoint: str | None
+
+
 def run_seedtts_similarity(
-    config,
+    config: SeedttsSimilarityConfig,
     *,
     log_per_sample: bool = False,
 ) -> dict:
@@ -326,9 +342,8 @@ def run_seedtts_similarity(
         torch.cuda.set_device(device)
         logger.info(f"Set speaker-similarity CUDA device to {device}")
 
-    override_checkpoint = getattr(config, "similarity_checkpoint", None)
     assets = ensure_speaker_similarity_assets(
-        finetune_checkpoint_override=override_checkpoint,
+        finetune_checkpoint_override=config.similarity_checkpoint,
     )
     scorer = WavLMSpeakerSimilarity(
         finetune_checkpoint=assets.finetune_checkpoint,
