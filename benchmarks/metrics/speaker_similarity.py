@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.signal import resample_poly
 
+logger = logging.getLogger(__name__)
+
 SAMPLE_RATE = 16000
+
+# Keys present in the published popsoda2002/seedtts-wavlm-sim
+# wavlm_large_finetune.pth that are training-time only (AAM-softmax /
+# ArcFace head used during fine-tuning) and not part of the inference
+# scorer. Allowlisted so loading does not have to be silently lenient.
+_HARMLESS_UNEXPECTED_KEYS = frozenset(
+    {
+        "loss_calculator.projection.weight",
+    }
+)
 
 
 class Res2Conv1dReluBn(nn.Module):
@@ -255,9 +268,41 @@ class WavLMSpeakerSimilarity:
         device: str,
     ):
         finetune_checkpoint = str(finetune_checkpoint)
+        wavlm_base = str(wavlm_base)
         self.model = ECAPATDNNWavLM(feature_extract=load_wavlm(wavlm_base))
         state_dict = torch.load(finetune_checkpoint, map_location="cpu")
-        self.model.load_state_dict(state_dict["model"], strict=False)
+        result = self.model.load_state_dict(state_dict["model"], strict=False)
+
+        if result.missing_keys:
+            raise RuntimeError(
+                "WavLM SV checkpoint is missing required weights — refusing to "
+                "score with a partially initialized model.\n"
+                f"  finetune_checkpoint: {finetune_checkpoint}\n"
+                f"  wavlm_base: {wavlm_base}\n"
+                f"  missing_keys ({len(result.missing_keys)}): "
+                f"{sorted(result.missing_keys)}"
+            )
+
+        unexpected = set(result.unexpected_keys) - _HARMLESS_UNEXPECTED_KEYS
+        if unexpected:
+            raise RuntimeError(
+                "WavLM SV checkpoint has unrecognized weights not on the "
+                "harmless-training-key allowlist — refusing to score with an "
+                "unverified checkpoint structure.\n"
+                f"  finetune_checkpoint: {finetune_checkpoint}\n"
+                f"  wavlm_base: {wavlm_base}\n"
+                f"  unexpected_keys (not allowlisted): {sorted(unexpected)}\n"
+                f"  allowlist: {sorted(_HARMLESS_UNEXPECTED_KEYS)}"
+            )
+
+        if result.unexpected_keys:
+            logger.info(
+                "WavLM SV checkpoint has %d allowlisted unexpected keys "
+                "(training-only artifacts): %s",
+                len(result.unexpected_keys),
+                sorted(result.unexpected_keys),
+            )
+
         self.model.to(device)
         self.model.eval()
         self.device = device
