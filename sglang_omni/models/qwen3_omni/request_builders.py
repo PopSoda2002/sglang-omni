@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import collections
+from collections.abc import Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +13,10 @@ import xxhash
 
 from sglang_omni.models.qwen3_omni.components.talker_prefill import TalkerPrefillBuilder
 from sglang_omni.models.qwen3_omni.payload_types import PipelineState, ThinkerOutput
+from sglang_omni.models.qwen3_omni.pending_text_queue import (
+    PendingTextTensorQueue,
+    coerce_pending_text_queue,
+)
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
@@ -479,7 +483,7 @@ def build_sglang_talker_request(
     talker_input_ids: torch.Tensor | list[int] | None = None,
     input_embeds_are_projected: bool = False,
     pending_text_queue: (
-        collections.deque[torch.Tensor] | list[torch.Tensor] | torch.Tensor | None
+        PendingTextTensorQueue | Iterable[torch.Tensor] | torch.Tensor | None
     ) = None,
     tts_pad_embed: torch.Tensor | None = None,
     thinker_chunks_done: bool = True,
@@ -492,7 +496,7 @@ def build_sglang_talker_request(
     Stores thinker hidden states as Req.input_embeds so SGLang's pipeline
     passes them through ForwardBatch.input_embeds -> model.forward(input_embeds=...).
     Uses dummy input_ids of matching length for position tracking, while the
-    host-side request data keeps a FIFO queue of future text rows for decode.
+    request data keeps a device-backed FIFO of future text rows for decode.
 
     Args:
         thinker_hidden_states: Embed layer hidden states [seq_len, hidden_size].
@@ -596,9 +600,7 @@ def build_sglang_talker_request(
         data.extra_model_outputs["talker_multimodal_mask"] = multimodal_mask
     data.input_embeds_are_projected = bool(input_embeds_are_projected)
     data.thinker_chunks_done = bool(thinker_chunks_done)
-    if isinstance(pending_text_queue, torch.Tensor):
-        pending_text_queue = [row.detach().cpu() for row in pending_text_queue]
-    data.pending_text_queue = collections.deque(pending_text_queue or [])
+    data.pending_text_queue = coerce_pending_text_queue(pending_text_queue)
     data.tts_pad_embed = tts_pad_embed
     return data
 
