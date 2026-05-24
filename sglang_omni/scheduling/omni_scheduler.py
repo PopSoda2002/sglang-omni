@@ -778,7 +778,7 @@ class OmniScheduler:
             if batch is None or id(batch) in seen:
                 continue
             seen.add(id(batch))
-            for req in getattr(batch, "reqs", []) or []:
+            for req in batch.reqs:
                 if req.rid != request_id or req.finished():
                     continue
                 req.to_finish = FINISH_ABORT()
@@ -790,22 +790,16 @@ class OmniScheduler:
         for batch in (self.running_batch, self.cur_batch, self.last_batch):
             if batch is None:
                 continue
-            for req in getattr(batch, "reqs", []) or []:
+            for req in batch.reqs:
                 if req.rid != request_id or id(req) in seen:
                     continue
                 seen.add(id(req))
                 self._release_request_kv_cache(req)
 
     def _release_request_kv_cache(self, req: Any) -> None:
-        if (
-            getattr(req, "req_pool_idx", None) is None
-            and getattr(req, "mamba_pool_idx", None) is None
-        ):
+        if req.req_pool_idx is None and req.mamba_pool_idx is None:
             return
-        try:
-            release_kv_cache(req, self.tree_cache)
-        except Exception:
-            logger.exception("OmniScheduler: KV cleanup failed for %s", req.rid)
+        release_kv_cache(req, self.tree_cache)
 
     def _event_loop_normal(self) -> None:
         # Note (Chenyang): yield the GIL when idle so co-located non-AR stages

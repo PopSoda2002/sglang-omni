@@ -6,6 +6,7 @@ import threading
 from queue import Queue
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from sglang_omni.scheduling import omni_scheduler as omni_scheduler_module
@@ -165,8 +166,18 @@ def test_omni_scheduler_run_batch_failure_emits_error_and_aborts(monkeypatch) ->
 
     batch = SimpleNamespace(
         reqs=[
-            SimpleNamespace(rid="req-1", _omni_data=SimpleNamespace(), req_pool_idx=1),
-            SimpleNamespace(rid="req-2", _omni_data=SimpleNamespace(), req_pool_idx=2),
+            SimpleNamespace(
+                rid="req-1",
+                _omni_data=SimpleNamespace(),
+                req_pool_idx=1,
+                mamba_pool_idx=None,
+            ),
+            SimpleNamespace(
+                rid="req-2",
+                _omni_data=SimpleNamespace(),
+                req_pool_idx=2,
+                mamba_pool_idx=None,
+            ),
         ],
         batch_is_full=True,
     )
@@ -187,6 +198,44 @@ def test_omni_scheduler_run_batch_failure_emits_error_and_aborts(monkeypatch) ->
     assert scheduler._pending_stream_chunks == {}
     assert scheduler._pending_stream_done == set()
     assert scheduler._deferred_request_payloads == {}
+
+
+def test_omni_scheduler_abort_propagates_immediate_kv_cleanup_failure(
+    monkeypatch,
+) -> None:
+    """Immediate abort cleanup must not hide allocator failures."""
+
+    def fail_release(_req, _cache) -> None:
+        raise RuntimeError("kv cleanup failed")
+
+    monkeypatch.setattr(omni_scheduler_module, "release_kv_cache", fail_release)
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._abort_callback = None
+    scheduler._aborted_request_ids = set()
+    scheduler._pending_stream_chunks = {}
+    scheduler._pending_stream_done = set()
+    scheduler._deferred_request_payloads = {}
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+    scheduler.inbox = Queue()
+    scheduler.waiting_queue = []
+    scheduler.tree_cache = object()
+
+    req = SimpleNamespace(
+        rid="req-fail",
+        _omni_data=SimpleNamespace(),
+        req_pool_idx=1,
+        mamba_pool_idx=None,
+    )
+    batch = SimpleNamespace(reqs=[req], batch_is_full=True)
+    scheduler.running_batch = batch
+    scheduler.cur_batch = batch
+    scheduler.last_batch = None
+
+    with pytest.raises(RuntimeError, match="kv cleanup failed"):
+        scheduler.abort("req-fail", defer_running_cleanup=False)
+
+    assert batch.reqs == [req]
 
 
 def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> None:

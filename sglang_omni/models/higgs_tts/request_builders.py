@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Protocol
 
 import torch
 from sglang.srt.managers.schedule_batch import Req
@@ -28,6 +28,14 @@ class HiggsSGLangRequestData(SGLangARRequestData):
     output_codes: list[torch.Tensor] = field(default_factory=list)
     generation_done: bool = False
     engine_start_s: float = 0.0
+
+
+class _ResettableHiggsModel(Protocol):
+    def reset_request(self, req_id: str) -> None: ...
+
+
+_HiggsRequestBuilder = Callable[[StagePayload], HiggsSGLangRequestData]
+_HiggsResultAdapter = Callable[[HiggsSGLangRequestData], StagePayload]
 
 
 def _ref_audio_fingerprint(codes: list[list[int]] | None) -> str | None:
@@ -110,7 +118,11 @@ def apply_higgs_result(state: HiggsTtsState, data: HiggsSGLangRequestData) -> No
     state.prompt_tokens = len(data.input_ids)
 
 
-def make_higgs_scheduler_adapters(model, *, max_new_tokens_cap: int | None = None):
+def make_higgs_scheduler_adapters(
+    model: _ResettableHiggsModel,
+    *,
+    max_new_tokens_cap: int | None = None,
+) -> tuple[_HiggsRequestBuilder, _HiggsResultAdapter]:
     """Build (request_builder, result_adapter) closures bound to a
     :class:`HiggsTTSModel` instance.
 

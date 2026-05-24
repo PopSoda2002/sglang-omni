@@ -50,6 +50,10 @@ tests/
     │   └── test_tp.py
     ├── qwen3_tts/
     │   └── test_pipeline.py
+    ├── higgs_tts/
+    │   ├── test_batched_step.py
+    │   ├── test_pipeline.py
+    │   └── test_request_builders.py
     ├── router/
     │   ├── test_app.py
     │   └── test_core.py
@@ -218,6 +222,12 @@ that happened to contain an older version of the test.
   - model-owned default preservation for language and sampling parameters
   - voice-clone reference validation
   - pipeline payload state serialization.
+
+- `unit_test/higgs_tts/`: Higgs TTS unit tests:
+  - OmniScheduler-backed AR stage factory wiring
+  - sampler-driven finish handling for eager and CUDA-graph paths
+  - request builder sampling normalization and server-side token caps
+  - model slot cleanup and engine timing in scheduler result adapters.
 
 - `unit_test/router/`: SGLang-Omni Router unit tests:
   - router CLI/config behavior
