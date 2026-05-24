@@ -128,8 +128,15 @@ def test_omni_scheduler_default_stream_done_sets_generic_flag() -> None:
     assert req_data.stream_done is True
 
 
-def test_omni_scheduler_run_batch_failure_emits_error_and_aborts() -> None:
+def test_omni_scheduler_run_batch_failure_emits_error_and_aborts(monkeypatch) -> None:
     """Forward failures are owned by the scheduler, not model executors."""
+    release_calls: list[tuple[str, object]] = []
+    tree_cache = object()
+    monkeypatch.setattr(
+        omni_scheduler_module,
+        "release_kv_cache",
+        lambda req, cache: release_calls.append((req.rid, cache)),
+    )
 
     class BoomModelRunner:
         def execute(self, sched_output):
@@ -150,6 +157,7 @@ def test_omni_scheduler_run_batch_failure_emits_error_and_aborts() -> None:
     scheduler._pending_stream_done = {"req-2"}
     scheduler._deferred_request_payloads = {"req-1": object()}
     scheduler._abort_callback = None
+    scheduler.tree_cache = tree_cache
     scheduler.waiting_queue = []
     scheduler.last_batch = None
     scheduler._first_emit_done = set()
@@ -157,8 +165,8 @@ def test_omni_scheduler_run_batch_failure_emits_error_and_aborts() -> None:
 
     batch = SimpleNamespace(
         reqs=[
-            SimpleNamespace(rid="req-1", _omni_data=SimpleNamespace()),
-            SimpleNamespace(rid="req-2", _omni_data=SimpleNamespace()),
+            SimpleNamespace(rid="req-1", _omni_data=SimpleNamespace(), req_pool_idx=1),
+            SimpleNamespace(rid="req-2", _omni_data=SimpleNamespace(), req_pool_idx=2),
         ],
         batch_is_full=True,
     )
@@ -175,14 +183,21 @@ def test_omni_scheduler_run_batch_failure_emits_error_and_aborts() -> None:
     assert all("cuda out of memory" in str(output.data) for output in outputs)
     assert scheduler._aborted_request_ids == {"req-1", "req-2"}
     assert batch.reqs == []
+    assert release_calls == [("req-1", tree_cache), ("req-2", tree_cache)]
     assert scheduler._pending_stream_chunks == {}
     assert scheduler._pending_stream_done == set()
     assert scheduler._deferred_request_payloads == {}
 
 
-def test_omni_scheduler_abort_marks_running_request_for_finish() -> None:
+def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> None:
     """Running aborts follow upstream SGLang's deferred KV cleanup path."""
     cleaned: list[str] = []
+    release_calls: list[str] = []
+    monkeypatch.setattr(
+        omni_scheduler_module,
+        "release_kv_cache",
+        lambda req, _cache: release_calls.append(req.rid),
+    )
     scheduler = object.__new__(OmniScheduler)
     scheduler._abort_callback = cleaned.append
     scheduler._aborted_request_ids = set()
@@ -197,6 +212,7 @@ def test_omni_scheduler_abort_marks_running_request_for_finish() -> None:
     req = SimpleNamespace(
         rid="req-run",
         to_finish=None,
+        req_pool_idx=1,
         finished=lambda: False,
     )
     batch = SimpleNamespace(reqs=[req], batch_is_full=True)
@@ -209,6 +225,7 @@ def test_omni_scheduler_abort_marks_running_request_for_finish() -> None:
     assert req in batch.reqs
     assert req.to_finish.to_json()["type"] == "abort"
     assert cleaned == []
+    assert release_calls == []
     assert scheduler._aborted_request_ids == {"req-run"}
     assert scheduler._pending_stream_chunks == {}
     assert scheduler._pending_stream_done == set()

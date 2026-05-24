@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +27,7 @@ class HiggsSGLangRequestData(SGLangARRequestData):
     codebook_size: int = 1026
     output_codes: list[torch.Tensor] = field(default_factory=list)
     generation_done: bool = False
+    engine_start_s: float = 0.0
 
 
 def _ref_audio_fingerprint(codes: list[list[int]] | None) -> str | None:
@@ -125,6 +127,7 @@ def make_higgs_scheduler_adapters(model, *, max_new_tokens_cap: int | None = Non
                 int(max_new_tokens_cap),
             )
         data = build_sglang_higgs_request(state, request_id=payload.request_id)
+        data.engine_start_s = time.perf_counter()
         data.stage_payload = payload
         return data
 
@@ -132,6 +135,8 @@ def make_higgs_scheduler_adapters(model, *, max_new_tokens_cap: int | None = Non
         payload = data.stage_payload
         state = HiggsTtsState.from_dict(payload.data)
         apply_higgs_result(state, data)
+        if data.engine_start_s:
+            state.engine_time_s = time.perf_counter() - data.engine_start_s
         model.reset_request(payload.request_id)
         return StagePayload(
             request_id=payload.request_id,

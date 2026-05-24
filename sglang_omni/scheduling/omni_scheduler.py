@@ -25,6 +25,7 @@ from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
 from sglang.srt.managers.scheduler import validate_input_length
+from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.utils import broadcast_pyobj
 
 from sglang_omni.profiler.event_recorder import emit as _emit_event
@@ -764,6 +765,7 @@ class OmniScheduler:
             req for req in self.waiting_queue if req.rid != request_id
         ]
         if not running_abort:
+            self._release_immediate_request_resources(request_id)
             _remove_from_batch(self.running_batch, request_id)
             _remove_from_batch(self.cur_batch, request_id)
             _remove_from_batch(self.last_batch, request_id)
@@ -782,6 +784,28 @@ class OmniScheduler:
                 req.to_finish = FINISH_ABORT()
                 marked = True
         return marked
+
+    def _release_immediate_request_resources(self, request_id: str) -> None:
+        seen: set[int] = set()
+        for batch in (self.running_batch, self.cur_batch, self.last_batch):
+            if batch is None:
+                continue
+            for req in getattr(batch, "reqs", []) or []:
+                if req.rid != request_id or id(req) in seen:
+                    continue
+                seen.add(id(req))
+                self._release_request_kv_cache(req)
+
+    def _release_request_kv_cache(self, req: Any) -> None:
+        if (
+            getattr(req, "req_pool_idx", None) is None
+            and getattr(req, "mamba_pool_idx", None) is None
+        ):
+            return
+        try:
+            release_kv_cache(req, self.tree_cache)
+        except Exception:
+            logger.exception("OmniScheduler: KV cleanup failed for %s", req.rid)
 
     def _event_loop_normal(self) -> None:
         # Note (Chenyang): yield the GIL when idle so co-located non-AR stages

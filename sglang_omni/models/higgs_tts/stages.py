@@ -232,18 +232,10 @@ def create_sglang_tts_engine_executor(
     model_path: str,
     *,
     device: str = "cuda:0",
-    max_new_tokens: int | None = None,
+    max_new_tokens: int | None = 2048,
     server_args_overrides: dict[str, Any] | None = None,
 ):
-    """sglang-backed AR engine for Higgs TTS — composes :class:`OmniScheduler`
-    with Higgs-specific request/result adapters and model runner.
-
-    Finish handling: sampler-driven EOC + delay wind-down is signalled by
-    setting ``req.finished_reason`` from inside the model runner; sglang's
-    native ``FINISH_LENGTH`` cap comes from each request's own
-    ``SamplingParams.max_new_tokens`` (sourced from
-    ``HiggsTtsState.max_new_tokens``).
-    """
+    """sglang-backed AR engine for Higgs TTS."""
     checkpoint_dir = resolve_checkpoint(model_path)
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
