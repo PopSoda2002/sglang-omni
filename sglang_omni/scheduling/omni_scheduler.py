@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
-from sglang.srt.managers.schedule_batch import ScheduleBatch
+from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
 from sglang.srt.managers.scheduler import validate_input_length
 from sglang.srt.utils import broadcast_pyobj
@@ -651,7 +651,7 @@ class OmniScheduler:
                         data=error,
                     )
                 )
-            self.abort(req.rid)
+            self.abort(req.rid, defer_running_cleanup=False)
 
     def _emit_prefill_start_for_batch(self, batch: Any) -> None:
         """Emit once when a request's first executable batch is selected."""
@@ -741,8 +741,13 @@ class OmniScheduler:
     def stop(self) -> None:
         self._running = False
 
-    def abort(self, request_id: str) -> None:
-        if self._abort_callback is not None:
+    def abort(self, request_id: str, *, defer_running_cleanup: bool = True) -> None:
+        running_abort = (
+            self._mark_running_request_aborted(request_id)
+            if defer_running_cleanup
+            else False
+        )
+        if self._abort_callback is not None and not running_abort:
             try:
                 self._abort_callback(request_id)
             except Exception:
@@ -758,10 +763,25 @@ class OmniScheduler:
         self.waiting_queue = [
             req for req in self.waiting_queue if req.rid != request_id
         ]
-        _remove_from_batch(self.running_batch, request_id)
-        _remove_from_batch(self.cur_batch, request_id)
-        _remove_from_batch(self.last_batch, request_id)
+        if not running_abort:
+            _remove_from_batch(self.running_batch, request_id)
+            _remove_from_batch(self.cur_batch, request_id)
+            _remove_from_batch(self.last_batch, request_id)
         self._drain_inbox_for_request(request_id)
+
+    def _mark_running_request_aborted(self, request_id: str) -> bool:
+        marked = False
+        seen: set[int] = set()
+        for batch in (self.running_batch, self.cur_batch, self.last_batch):
+            if batch is None or id(batch) in seen:
+                continue
+            seen.add(id(batch))
+            for req in getattr(batch, "reqs", []) or []:
+                if req.rid != request_id or req.finished():
+                    continue
+                req.to_finish = FINISH_ABORT()
+                marked = True
+        return marked
 
     def _event_loop_normal(self) -> None:
         # Note (Chenyang): yield the GIL when idle so co-located non-AR stages

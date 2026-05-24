@@ -180,6 +180,68 @@ def test_omni_scheduler_run_batch_failure_emits_error_and_aborts() -> None:
     assert scheduler._deferred_request_payloads == {}
 
 
+def test_omni_scheduler_abort_marks_running_request_for_finish() -> None:
+    """Running aborts follow upstream SGLang's deferred KV cleanup path."""
+    cleaned: list[str] = []
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._abort_callback = cleaned.append
+    scheduler._aborted_request_ids = set()
+    scheduler._pending_stream_chunks = {"req-run": ["stale"]}
+    scheduler._pending_stream_done = {"req-run"}
+    scheduler._deferred_request_payloads = {"req-run": object()}
+    scheduler._first_emit_done = {"req-run"}
+    scheduler._prefill_start_done = {"req-run"}
+    scheduler.inbox = Queue()
+    scheduler.waiting_queue = []
+
+    req = SimpleNamespace(
+        rid="req-run",
+        to_finish=None,
+        finished=lambda: False,
+    )
+    batch = SimpleNamespace(reqs=[req], batch_is_full=True)
+    scheduler.running_batch = batch
+    scheduler.cur_batch = batch
+    scheduler.last_batch = None
+
+    scheduler.abort("req-run")
+
+    assert req in batch.reqs
+    assert req.to_finish.to_json()["type"] == "abort"
+    assert cleaned == []
+    assert scheduler._aborted_request_ids == {"req-run"}
+    assert scheduler._pending_stream_chunks == {}
+    assert scheduler._pending_stream_done == set()
+    assert scheduler._deferred_request_payloads == {}
+    assert scheduler._first_emit_done == set()
+    assert scheduler._prefill_start_done == set()
+
+
+def test_omni_scheduler_abort_cleans_queued_request_immediately() -> None:
+    """Queued aborts have no KV allocation, so callback cleanup can run now."""
+    cleaned: list[str] = []
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._abort_callback = cleaned.append
+    scheduler._aborted_request_ids = set()
+    scheduler._pending_stream_chunks = {}
+    scheduler._pending_stream_done = set()
+    scheduler._deferred_request_payloads = {}
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+    scheduler.inbox = Queue()
+
+    req = SimpleNamespace(rid="req-wait")
+    scheduler.waiting_queue = [req]
+    scheduler.running_batch = SimpleNamespace(reqs=[], batch_is_full=False)
+    scheduler.cur_batch = None
+    scheduler.last_batch = None
+
+    scheduler.abort("req-wait")
+
+    assert scheduler.waiting_queue == []
+    assert cleaned == ["req-wait"]
+
+
 def test_omni_scheduler_distinguishes_queue_enter_from_prefill_start(
     monkeypatch,
 ) -> None:
