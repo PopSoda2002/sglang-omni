@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -238,3 +239,49 @@ def print_asr_speed_summary(metrics: dict, model_name: str) -> None:
             f"  {'Audio processed (s):':<{lw}} " f"{metrics['asr_audio_processed_s']}"
         )
     print(f"{'=' * w}")
+
+
+# ---------------------------------------------------------------------------
+# Seed-TTS WER — used by benchmark_tts_seedtts. Reference:
+# https://github.com/BytedanceSpeech/seed-tts-eval/blob/main/run_wer.py
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def _seed_tts_punct() -> str:
+    import string
+
+    from zhon.hanzi import punctuation as zh_punctuation
+
+    return zh_punctuation + string.punctuation
+
+
+def calculate_wer_seed_tts(ref: str, hyp: str, lang: str):
+    """Per-sample SeedTTS WER (en/zh). Returns ``(WordOutput, ref_n, hyp_n)``.
+
+    Strips ``zhon.hanzi.punctuation + string.punctuation`` (except ``'``),
+    collapses double spaces, char-tokenizes for zh / lowercases for en,
+    then runs ``jiwer.process_words``.
+    """
+    import jiwer
+
+    punct = _seed_tts_punct()
+    for x in punct:
+        if x == "'":
+            continue
+        ref = ref.replace(x, "")
+        hyp = hyp.replace(x, "")
+
+    ref = ref.replace("  ", " ")
+    hyp = hyp.replace("  ", " ")
+
+    if lang == "zh":
+        ref_n = " ".join(list(ref))
+        hyp_n = " ".join(list(hyp))
+    elif lang == "en":
+        ref_n = ref.lower()
+        hyp_n = hyp.lower()
+    else:
+        raise NotImplementedError(f"seed_tts WER only supports en/zh, got {lang!r}")
+
+    return jiwer.process_words(ref_n, hyp_n), ref_n, hyp_n

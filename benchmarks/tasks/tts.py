@@ -47,6 +47,7 @@ from benchmarks.metrics.speaker_similarity_assets import (
 from benchmarks.metrics.wer import (
     calculate_asr_speed_metrics,
     calculate_wer_metrics,
+    calculate_wer_seed_tts,
     print_asr_speed_summary,
     print_wer_summary,
 )
@@ -116,23 +117,7 @@ def normalize_text(text: str, lang: str) -> str:
 def load_asr_model(lang: str, device: str, generation_mode: str | None = None):
     """Load ASR model for voice clone WER evaluation."""
     mode_suffix = f" for {generation_mode} generation" if generation_mode else ""
-    if lang == "en":
-        from transformers import pipeline
-
-        logger.info(
-            f"Loading Whisper-large-v3 on {device}{mode_suffix} "
-            "(pipeline, chunk_length_s=30)..."
-        )
-        t0 = time.perf_counter()
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model="openai/whisper-large-v3",
-            chunk_length_s=30,
-            device=device,
-        )
-        logger.info(f"Whisper loaded in {time.perf_counter() - t0:.1f}s{mode_suffix}")
-        return {"type": "whisper", "pipeline": pipe}
-    elif lang == "zh":
+    if lang == "zh":
         from funasr import AutoModel
 
         logger.info(f"Loading FunASR paraformer-zh{mode_suffix}...")
@@ -140,20 +125,59 @@ def load_asr_model(lang: str, device: str, generation_mode: str | None = None):
         model = AutoModel(model="paraformer-zh")
         logger.info(f"FunASR loaded in {time.perf_counter() - t0:.1f}s{mode_suffix}")
         return {"type": "funasr", "model": model}
-    else:
-        raise ValueError(f"Unsupported language: {lang}")
+
+    # Raw WhisperProcessor + WhisperForConditionalGeneration in float32 with
+    # forced_decoder_ids for the target language, rather than the HF pipeline,
+    # so transcribe can decode without 30 s chunking (truncation=False,
+    # return_timestamps=True).
+    from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+    logger.info(f"Loading Whisper-large-v3 on {device}{mode_suffix} (lang={lang})...")
+    t0 = time.perf_counter()
+    processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+    model = WhisperForConditionalGeneration.from_pretrained(
+        "openai/whisper-large-v3", torch_dtype=torch.float32
+    ).to(device)
+    model.eval()
+    forced_decoder_ids = processor.get_decoder_prompt_ids(
+        language=lang, task="transcribe"
+    )
+    logger.info(f"Whisper loaded in {time.perf_counter() - t0:.1f}s{mode_suffix}")
+    return {
+        "type": "whisper",
+        "processor": processor,
+        "model": model,
+        "forced_decoder_ids": forced_decoder_ids,
+        "lang": lang,
+    }
 
 
 def transcribe(asr: dict, wav_path: str, lang: str, device: str) -> str:
     if asr["type"] == "whisper":
-        # pipeline internally chunks at chunk_length_s=30 with stride overlap,
-        # so outputs longer than 30 s are transcribed end-to-end rather than
-        # silently truncated to the first 30 s.
-        result = asr["pipeline"](
-            wav_path,
-            generate_kwargs={"language": "english", "task": "transcribe"},
-        )
-        return result["text"]
+        # 16 kHz load, no truncation, forced_decoder_ids for the target
+        # language, and return_timestamps=True so clips longer than 30 s
+        # decode end-to-end.
+        import librosa
+
+        processor = asr["processor"]
+        model = asr["model"]
+        signal = librosa.load(wav_path, sr=16000)[0]
+        inputs = processor(
+            signal,
+            sampling_rate=16000,
+            return_tensors="pt",
+            return_attention_mask=True,
+            truncation=False,
+            padding="longest",
+        ).to(device)
+        with torch.no_grad():
+            predicted_ids = model.generate(
+                **inputs,
+                forced_decoder_ids=asr["forced_decoder_ids"],
+                return_timestamps=True,
+            )
+        text = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+        return text.strip()
     elif asr["type"] == "funasr":
         import zhconv
 
@@ -170,8 +194,15 @@ def transcribe_and_compute_wer(
     asr: dict,
     lang: str,
     device: str,
+    wer_variant: str = "legacy",
 ) -> SampleOutput:
-    """Transcribe audio and compute per-sample WER metrics."""
+    """Transcribe audio and compute per-sample WER metrics.
+
+    ``wer_variant`` selects the text-normalization recipe:
+      - ``"legacy"``  : Whisper EnglishTextNormalizer (en) / zhon-strip +
+        char-tokenize (zh)
+      - ``"seed_tts"``: BytedanceSpeech seed-tts-eval recipe (en/zh only).
+    """
     try:
         hyp_text = transcribe(asr, wav_path, lang, device)
     except Exception as exc:
@@ -180,14 +211,25 @@ def transcribe_and_compute_wer(
         return output
 
     output.whisper_text = hyp_text
-    output.ref_norm = normalize_text(output.target_text, lang)
-    output.hyp_norm = normalize_text(hyp_text, lang)
+
+    if wer_variant == "seed_tts":
+        measures, output.ref_norm, output.hyp_norm = calculate_wer_seed_tts(
+            output.target_text, hyp_text, lang
+        )
+    elif wer_variant == "legacy":
+        output.ref_norm = normalize_text(output.target_text, lang)
+        output.hyp_norm = normalize_text(hyp_text, lang)
+        if not output.ref_norm:
+            output.error = "Empty reference after normalization"
+            return output
+        measures = process_words(output.ref_norm, output.hyp_norm)
+    else:
+        raise ValueError(f"Unknown wer_variant: {wer_variant!r}")
 
     if not output.ref_norm:
         output.error = "Empty reference after normalization"
         return output
 
-    measures = process_words(output.ref_norm, output.hyp_norm)
     output.wer = measures.wer
     output.substitutions = measures.substitutions
     output.deletions = measures.deletions
@@ -541,6 +583,7 @@ def _transcribe_one_entry(
     asr: dict,
     lang: str,
     device: str,
+    wer_variant: str = "legacy",
 ) -> SampleOutput:
     """Transcribe a single ``generated.json`` entry and compute its WER."""
     output = SampleOutput(
@@ -554,7 +597,9 @@ def _transcribe_one_entry(
     output.latency_s = entry.get("latency_s", 0.0)
     output.audio_duration_s = entry.get("audio_duration_s", 0.0)
     asr_t0 = time.perf_counter()
-    output = transcribe_and_compute_wer(output, entry["wav_path"], asr, lang, device)
+    output = transcribe_and_compute_wer(
+        output, entry["wav_path"], asr, lang, device, wer_variant=wer_variant
+    )
     output.asr_latency_s = time.perf_counter() - asr_t0
     return output
 
@@ -593,12 +638,16 @@ def run_seedtts_transcribe(
     wer_config: dict,
     generation_mode: str | None = None,
     log_per_sample: bool = False,
+    wer_variant: str = "legacy",
 ) -> dict:
     """Transcribe saved audio, compute WER + ASR-speed metrics, and persist them.
 
     Shared pipeline used by both Qwen3-Omni and S2-Pro seed-tts-eval benchmarks.
     The caller-specific ``wer_config`` dict is embedded in ``wer_results.json``
     to preserve backward-compatible fields.
+
+    ``wer_variant`` selects the text-normalization recipe; see
+    :func:`transcribe_and_compute_wer`.
 
     Returns a dict with keys:
         - ``wer_summary``: corpus-level WER metrics (see :func:`calculate_wer_metrics`)
@@ -621,7 +670,9 @@ def run_seedtts_transcribe(
     )
     outputs: list[SampleOutput] = []
     for idx, entry in enumerate(tqdm(generated, desc=tqdm_desc)):
-        output = _transcribe_one_entry(entry, asr, config.lang, config.device)
+        output = _transcribe_one_entry(
+            entry, asr, config.lang, config.device, wer_variant=wer_variant
+        )
         outputs.append(output)
         _log_transcribe_result(
             idx=idx,

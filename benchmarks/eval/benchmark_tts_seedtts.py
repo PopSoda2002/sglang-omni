@@ -322,6 +322,7 @@ def run_tts_seedtts_transcribe(config: TtsSeedttsBenchmarkConfig) -> dict:
         config,
         wer_config=wer_config,
         generation_mode=generation_mode,
+        wer_variant="seed_tts",
     )
 
 
