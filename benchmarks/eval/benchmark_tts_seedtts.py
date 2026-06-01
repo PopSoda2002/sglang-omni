@@ -101,6 +101,10 @@ outlier-excluded corpus WER is 1.36%.
 | S2-Pro | EN, stream=True  | 1.06%      | 1.02%               | 0.00%                 | 3.5%               | 1088/1088 | 0       | PR #411 [H100, full-set, c=16] |
 | S2-Pro | ZH, stream=False | 0.92%      | 0.87%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #411 [H100, full-set, c=16] |
 | S2-Pro | ZH, stream=True  | 0.90%      | 0.86%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #411 [H100, full-set, c=16] |
+| S2-Pro | EN, stream=False | 1.65%      | 1.63%               | 0.00%                 | 4.6%               | 1088/1088 | 0       | PR #645 [H100, full-set, c=16] |
+| S2-Pro | EN, stream=True  | 1.53%      | 1.50%               | 0.00%                 | 4.4%               | 1088/1088 | 0       | PR #645 [H100, full-set, c=16] |
+| S2-Pro | ZH, stream=False | 0.91%      | 0.86%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #645 [H100, full-set, c=16] |
+| S2-Pro | ZH, stream=True  | 0.90%      | 0.86%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #645 [H100, full-set, c=16] |
 | Higgs TTS | EN, stream=False | 4.68%   | 4.16%               | 0.00%                 | 91.2%              | 1088/1088 | 0       | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
 | Higgs TTS | ZH, stream=False | 1.14%   | 1.08%               | 0.00%                 | 2.7%               | 2020/2020 | 0       | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
 
@@ -120,6 +124,10 @@ Generation speed (generation.speed)
 | S2-Pro | EN, stream=True  | 12.164         | 16.717        | 3.265    | 1.308          | 67.0                           | PR #411 [H100, V1-pipeline, full-set, c=16] |
 | S2-Pro | ZH, stream=False | 12.028         | 15.526        | 2.256    | 1.327          | 65.7                           | PR #411 [H100, V1-pipeline, full-set, c=16] |
 | S2-Pro | ZH, stream=True  | 11.417         | 15.020        | 2.141    | 1.398          | 65.5                           | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| S2-Pro | EN, stream=False | 16.685         | 22.016        | 4.518    | 0.953          | 63.3                           | PR #645 [H100, full-set, c=16] |
+| S2-Pro | EN, stream=True  | 16.453         | 22.002        | 4.460    | 0.966          | 54.8                           | PR #645 [H100, full-set, c=16] |
+| S2-Pro | ZH, stream=False | 16.442         | 20.345        | 3.115    | 0.970          | 66.9                           | PR #645 [H100, full-set, c=16] |
+| S2-Pro | ZH, stream=True  | 16.348         | 20.560        | 3.096    | 0.976          | 55.7                           | PR #645 [H100, full-set, c=16] |
 | Higgs TTS | EN, stream=False | 1.749       | 2.600         | 0.425    | 9.104          | 112.9                          | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
 | Higgs TTS | ZH, stream=False | 1.629       | 2.110         | 0.282    | 9.792          | 109.9                          | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
 
@@ -135,6 +143,8 @@ ASR speed (accuracy.asr_speed) — Whisper-large-v3 for EN, FunASR paraformer-zh
 | --------- | ---- | ------------------ | ------------ | ---------------------------- | ----------------------------------------------- |
 | S2-Pro    | EN   | 0.297              | 0.0772       | 3.36                         | PR #393 [H200, from S2-Pro EN stream=False run] |
 | S2-Pro    | ZH   | 0.294              | 0.0556       | 3.40                         | PR #393 [H200, from S2-Pro ZH stream=False run] |
+| S2-Pro    | EN   | 0.285              | 0.0762       | 3.50                         | PR #645 [H100, from S2-Pro EN stream=False run] |
+| S2-Pro    | ZH   | 0.095              | 0.0179       | 10.56                        | PR #645 [H100, from S2-Pro ZH stream=False run] |
 | Higgs TTS | EN   | 0.360              | 0.0835       | 2.78                         | PR #534 [H200, from Higgs TTS EN stream=False run] |
 | Higgs TTS | ZH   | 0.0867             | 0.0157       | 11.53                        | PR #534 [H200, from Higgs TTS ZH stream=False run] |
 """
