@@ -47,9 +47,9 @@ class ConvSubsampling(nn.Module):
     def forward(self, features_BTM):
         hidden_BCTM = rearrange(features_BTM, "b t m -> b 1 t m")
         hidden_BCTM = self.conv(hidden_BCTM)
-        hidden_BTM = rearrange(hidden_BCTM, "b c t m -> b t (c m)")
-        hidden_BTM = self.out(hidden_BTM)
-        return hidden_BTM
+        flattened_BTF = rearrange(hidden_BCTM, "b c t m -> b t (c m)")
+        subsampled_BTD = self.out(flattened_BTF)
+        return subsampled_BTD
 
 POINTWISE_CONV_KERNEL_SIZE = 1
 
