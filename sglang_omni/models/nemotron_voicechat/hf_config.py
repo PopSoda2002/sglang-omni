@@ -1,3 +1,5 @@
+import json
+import pathlib
 from huggingface_hub import hf_hub_download
 from transformers import AutoConfig
 from sglang.srt.configs.nemotron_h import NemotronHConfig
@@ -13,13 +15,13 @@ def _load_backbone_config(repo_id):
     return backbone
 
 class NemotronVoiceChatConfig(NemotronHConfig):
-    model_type = "nemotron-voicechat"
+    model_type = "nemotron_voicechat"
 
-    def __init__(self, perception, speech_generation, duplex, text_backbone_path, **kwargs):
+    def __init__(self, perception=None, speech_generation=None, duplex=None, text_backbone_path=None, **kwargs):
         super().__init__(**kwargs)
-        self.perception = perception
-        self.speech_generation = speech_generation
-        self.duplex = duplex
+        self.perception = dict(perception or {})
+        self.speech_generation = dict(speech_generation or {})
+        self.duplex = dict(duplex or {})
         self.text_backbone_path = text_backbone_path
 
     @classmethod
@@ -29,7 +31,7 @@ class NemotronVoiceChatConfig(NemotronHConfig):
             return super().from_dict(config_dict, **kwargs)
 
         stt_config = config_dict["model"]["stt"]["model"]
-        backbone_path = stt["pretrained_llm"]
+        backbone_path = stt_config["pretrained_llm"]
         return super().from_dict(
             {
                 **_load_backbone_config(backbone_path),
@@ -48,7 +50,7 @@ class NemotronVoiceChatConfig(NemotronHConfig):
 
 def register_voicechat_hf_config():
     global _voicechat_hf_config_registered
-    AutoConfig.register("nemotron_voicechat", NemotronVoiceChatConfig, exists_ok=True)
+    AutoConfig.register("nemotron_voicechat", NemotronVoiceChatConfig, exist_ok=True)
     _voicechat_hf_config_registered = True
 
 __all__ = [
