@@ -57,3 +57,4 @@ asr_seedtts_results.json
 # XPU installer lock/backup
 .pyproject.xpu.lock
 .pyproject.cuda.bak
+.voicechat-ref/
