@@ -8,6 +8,8 @@ from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.models.nemotron_h import NemotronHForCausalLM
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
+from sglang.srt.server_args import get_global_server_args
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
 from sglang_omni.models.nemotron_voicechat.fusion import AddFusion
 
@@ -29,13 +31,47 @@ class NemotronVoiceChatForCausalLM(nn.Module):
             prefix=add_prefix("function_head", prefix),
         )
         self.fusion = AddFusion(config.duplex)
+        embedding = self.llm.get_input_embeddings().weight
+        max_batch = get_global_server_args().max_running_requests
+        self._fusion_buffer = torch.zeros(
+            max_batch, config.hidden_size, device=embedding.device, dtype=embedding.dtype
+        )
+        self._fusion_mask = torch.zeros(max_batch, dtype=torch.bool, device=embedding.device)
+        self._function_ids = torch.zeros(max_batch, dtype=torch.long, device=embedding.device)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.llm.get_input_embeddings()
 
     def forward(self, input_ids, positions, forward_batch, input_embeds, **omni_kwargs):
         del omni_kwargs
-        return self.llm(input_ids, positions, forward_batch, input_embeds)
+        if input_embeds is None:
+            input_embeds = self.llm.get_input_embeddings()(input_ids)
+            batch = input_embeds.shape[0]
+            mask = self._fusion_mask[:batch]
+            input_embeds = torch.where(
+                mask.unsqueeze(-1),
+                self._fusion_buffer[:batch].to(input_embeds.dtype),
+                input_embeds,
+            )
+            self._fusion_mask[:batch] = False
+        hidden = self.llm.model.forward(
+          input_ids, positions, forward_batch, None, input_embeds
+        )
+        self._sample_function_ids(hidden, forward_batch)
+        return self.llm.logits_processor(
+            input_ids, hidden, self.llm.lm_head, forward_batch
+        )
+
+    def _sample_function_ids(self, hidden, forward_batch):
+        if forward_batch.forward_mode == ForwardMode.EXTEND:
+            last = torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
+            hidden = hidden[last]
+        logits = self.function_head(hidden)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        batch = logits.shape[0]
+        # The function id is only sampled at greedy sampling
+        self._function_ids[:batch] = logits.argmax(dim=-1)
 
     def _backbone_weights_stream(self, parameters, weights):
         # Drop RNN weights from the stream.
