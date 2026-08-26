@@ -8,6 +8,12 @@ from einops import rearrange, einsum
 DEFAULT_PREEMPHASIS = 0.97
 DEFAULT_LOG_ZERO_GUARD = 2**-24
 
+class Featurizer(nn.Module):
+    def __init__(self, num_mels: int, num_freqs: int, win_length: int):
+        super().__init__()
+        self.register_buffer("fb", torch.empty(1, num_mels, num_freqs))
+        self.register_buffer("window", torch.empty(win_length))
+
 class LogMelFeatures(nn.Module):
     def __init__(self, config: dict) -> None:
         super().__init__()
@@ -18,16 +24,17 @@ class LogMelFeatures(nn.Module):
         num_mels = int(config["features"])
         num_freqs = self.n_fft // 2 + 1
 
-        self.register_buffer("fb_MF", torch.empty(num_mels, num_freqs))
-        self.register_buffer("window_W", torch.empty(self.win_length))
+        self.left_padding = self.n_fft - self.hop_length
+        self.featurizer = Featurizer(num_mels, num_freqs, self.win_length)
 
     # Wavform -> spectrogram -> mel -> log mel
     def forward(self, waveform_BL: torch.Tensor) -> torch.Tensor:
-        waveform_BL = waveform_BL.to(dtype=self.window_W.dtype)
+        waveform_BL = waveform_BL.to(dtype=self.featurizer.window.dtype)
         preemphasized_BL = torch.cat((waveform_BL[:, :1], waveform_BL[:, 1:] - DEFAULT_PREEMPHASIS * waveform_BL[:, :-1]), dim=1)
-        spectrum_BFT = torch.stft(preemphasized_BL, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length, 
-            return_complex=True, pad_mode="constant", center=True, window=self.window_W)
+        padded_BL = nn.functional.pad(preemphasized_BL, (self.left_padding, 0))
+        spectrum_BFT = torch.stft(padded_BL, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length,
+            return_complex=True, center=False, window=self.featurizer.window)
         power_BFT = spectrum_BFT.abs().square()
-        mel_BMT = einsum(self.fb_MF, power_BFT,"m f, b f t -> b m t")
+        mel_BMT = einsum(self.featurizer.fb[0], power_BFT, "m f, b f t -> b m t")
         log_mel_BMT = torch.log(mel_BMT + DEFAULT_LOG_ZERO_GUARD)
         return rearrange(log_mel_BMT, "b m t -> b t m")

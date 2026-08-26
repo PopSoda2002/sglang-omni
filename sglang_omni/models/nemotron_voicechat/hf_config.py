@@ -50,6 +50,8 @@ class NemotronVoiceChatConfig(NemotronHConfig):
 
 def register_voicechat_hf_config():
     global _voicechat_hf_config_registered
+    if _voicechat_hf_config_registered:
+        return
     AutoConfig.register("nemotron_voicechat", NemotronVoiceChatConfig, exist_ok=True)
     _voicechat_hf_config_registered = True
 
