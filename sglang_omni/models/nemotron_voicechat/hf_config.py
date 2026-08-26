@@ -35,6 +35,7 @@ class NemotronVoiceChatConfig(NemotronHConfig):
         return super().from_dict(
             {
                 **_load_backbone_config(backbone_path),
+                "architectures": [VOICECHAT_MODEL_ARCH_OVERRIDE],
                 "perception": stt_config["perception"],
                 "speech_generation": config_dict["model"]["speech_generation"]["model"],
                 "duplex": {

@@ -4,11 +4,11 @@ import torch
 from torch import nn
 
 class AddFusion(nn.Module):
-    def __init__(self, *, text_weight, user_weight, function_weight):
+    def __init__(self, config: dict) -> None:
         super().__init__()
-        self.text_weight = float(text_weight)
-        self.user_weight = float(user_weight)
-        self.function_weight = float(function_weight)
+        self.user_weight = float(config["duplex_user_channel_weight"])
+        self.text_weight = float(config["duplex_text_channel_weight"])
+        self.function_weight = float(config["duplex_function_channel_weight"])
 
     def forward(self, acoustic, text, function: torch.Tensor | None = None) -> torch.Tensor:
         output = (self.user_weight * acoustic) + (self.text_weight * text)
