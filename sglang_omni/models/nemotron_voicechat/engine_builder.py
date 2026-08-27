@@ -16,6 +16,7 @@ from sglang_omni.models.nemotron_voicechat.request_builders import (
     apply_thinker_result,
     build_thinker_request,
 )
+from sglang.kernels.ops.mamba.triton_ops import initialize_mamba_selective_state_update_backend
 
 SHIM_DIR = Path.home() / ".cache" / "sglang-omni" / "voicechat"
 
@@ -63,6 +64,11 @@ class NemotronVoiceChatEngineBuilder(TtsEngineBuilder):
     def setup_model(self, *, model_worker, checkpoint_dir, device, gpu_id, server_args):
         del model_worker, checkpoint_dir, device, gpu_id, server_args
 
+    def customize_server_args(self, server_args):
+        initialize_mamba_selective_state_update_backend(server_args)
+
     def make_adapters(self, model):
-        del model
-        return build_thinker_request, apply_thinker_result
+        vocab_size = int(model.llm.config.vocab_size)
+        def build(payload):
+            return build_thinker_request(payload, vocab_size=vocab_size)
+        return build, apply_thinker_result

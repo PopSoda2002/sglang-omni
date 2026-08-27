@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import torch
+
 from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
@@ -9,7 +11,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 PAD_TOKEN_ID = 12
 BOS_TOKEN_ID = 1
 
-def build_thinker_request(payload: StagePayload) -> SGLangARRequestData:
+def build_thinker_request(payload: StagePayload, *, vocab_size: int) -> SGLangARRequestData:
     state = NemotronVoiceChatState.from_dict(payload.data)
     num_frames = state.num_frames
     input_ids = [BOS_TOKEN_ID] + [PAD_TOKEN_ID] * (num_frames - 1)
@@ -24,10 +26,11 @@ def build_thinker_request(payload: StagePayload) -> SGLangARRequestData:
         origin_input_text="",
         origin_input_ids=input_ids,
         sampling_params=sampling_params,
+        vocab_size=vocab_size,
     )
     return SGLangARRequestData(
         req=req,
-        input_ids=state.acoustic_frames.new_tensor(input_ids, dtype=None),
+        input_ids=torch.tensor(input_ids, dtype=torch.long),
         stage_payload=payload,
         max_new_tokens=num_frames,
         temperature=0.0,

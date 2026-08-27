@@ -47,10 +47,11 @@ class NemotronVoiceChatModelRunner(ModelRunner):
         return self.model.fusion(acoustic, text)
 
     def _decode_row(self, data, device, dtype) -> torch.Tensor:
-        frame_index = len(data.output_ids)
+        output_ids = data.req.output_ids
+        frame_index = len(output_ids)
         embeddings = self.model.llm.get_input_embeddings()
         tokens = torch.tensor(
-            [data.output_ids[-1], data.extra_model_outputs["function_ids"][-1]],
+            [output_ids[-1], data.extra_model_outputs["function_ids"][-1]],
             dtype=torch.long,
             device=embeddings.weight.device,
         )

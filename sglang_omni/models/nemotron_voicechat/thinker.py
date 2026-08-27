@@ -42,7 +42,7 @@ class NemotronVoiceChatForCausalLM(nn.Module):
     def get_input_embeddings(self) -> nn.Module:
         return self.llm.get_input_embeddings()
 
-    def forward(self, input_ids, positions, forward_batch, input_embeds, **omni_kwargs):
+    def forward(self, input_ids, positions, forward_batch, input_embeds=None, **omni_kwargs):
         del omni_kwargs
         if input_embeds is None:
             input_embeds = self.llm.get_input_embeddings()(input_ids)
