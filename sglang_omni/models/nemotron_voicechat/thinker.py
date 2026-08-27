@@ -21,8 +21,8 @@ BACKBONE_RENAMES_MAP = (
 )
 
 class NemotronVoiceChatForCausalLM(nn.Module):
-    def __init__(self, *, config, quant_config, prefix):
-        super().__init__()
+    def  __init__(self, *, config, quant_config=None, prefix=""):
+        super().__init__() 
         self.llm = NemotronHForCausalLM(config=config, quant_config=quant_config, prefix=add_prefix("llm", prefix))
         self.function_head = ParallelLMHead(
             config.vocab_size,
@@ -66,9 +66,7 @@ class NemotronVoiceChatForCausalLM(nn.Module):
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             last = torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
             hidden = hidden[last]
-        logits = self.function_head(hidden)
-        if isinstance(logits, tuple):
-            logits = logits[0]
+        logits = self.function_head.quant_method.apply(self.function_head, hidden)
         batch = logits.shape[0]
         # The function id is only sampled at greedy sampling
         self._function_ids[:batch] = logits.argmax(dim=-1)
