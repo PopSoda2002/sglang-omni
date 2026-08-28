@@ -58,7 +58,7 @@ class ResidualVectorQuantizer(nn.Module):
 
 class Latent2Wav(nn.Module):
     def __init__(self, config: dict) -> None:
-        super().__init__():
+        super().__init__()
         self.n_fft = int(config["n_fft"])
         self.hop_length = int(config["hop_length"])
         base = int(config["base_hidden_size"])
