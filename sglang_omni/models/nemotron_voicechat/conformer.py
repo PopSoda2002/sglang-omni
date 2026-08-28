@@ -11,11 +11,10 @@ SUBSAMPLING_STRIDE = 2
 class CausalConv2d(nn.Conv2d):
     def __init__(self, in_channels, out_channels, *, groups=1):
         super().__init__(in_channels, out_channels, kernel_size=SUBSAMPLING_KERNEL_SIZE, stride=SUBSAMPLING_STRIDE, padding=0, groups=groups)
-        self.time_padding = (SUBSAMPLING_KERNEL_SIZE - 1, 0)
-        self.freq_padding = (SUBSAMPLING_KERNEL_SIZE - 1, SUBSAMPLING_STRIDE - 1)
+        self.causal_padding = (SUBSAMPLING_KERNEL_SIZE - 1, SUBSAMPLING_STRIDE - 1)
 
     def forward(self, input_BCTM):
-        padded_BCTM = nn.functional.pad(input_BCTM, (*self.freq_padding, *self.time_padding))
+        padded_BCTM = nn.functional.pad(input_BCTM, (*self.causal_padding, *self.causal_padding))
         convolved_BCTM = super().forward(padded_BCTM)
         return convolved_BCTM
 

@@ -14,7 +14,7 @@ BOS_TOKEN_ID = 1
 def build_thinker_request(payload: StagePayload, *, vocab_size: int) -> SGLangARRequestData:
     state = NemotronVoiceChatState.from_dict(payload.data)
     num_frames = state.num_frames
-    input_ids = [BOS_TOKEN_ID] + [PAD_TOKEN_ID] * (num_frames - 1)
+    input_ids = [BOS_TOKEN_ID]
     sampling_params = SamplingParams(
         max_new_tokens=num_frames,
         temperature=0.0,

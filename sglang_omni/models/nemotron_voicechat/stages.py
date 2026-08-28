@@ -70,9 +70,9 @@ def create_perception_executor(model_path: str, *, dtype=None, device=None):
         waveform_1S = rearrange(waveform, "s -> 1 s") if waveform.ndim == 1 else waveform
 
         frames = module(waveform_1S.to(device=device, dtype=parameter_dtype))
-        assert frames.shape[1] == state.num_frames, (
-            f"Perception returned {frames.shape[1]} frames for {state.num_frames} "
-            "frames of audio; the 12.5 Hz timeline has drifted."
+        assert frames.shape[1] == state.num_frames + 1, (
+            f"Perception returned {frames.shape[1]} rows for {state.num_frames} "
+            "frames of audio; expected one more than the frame count."
         )
 
         state.acoustic_frames = frames[0]
