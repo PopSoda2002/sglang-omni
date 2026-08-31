@@ -38,12 +38,24 @@ class NemotronVoiceChatModelRunner(ModelRunner):
     def _acoustic_frames(data) -> torch.Tensor:
         return NemotronVoiceChatState.from_dict(data.stage_payload.data).acoustic_frames
 
+    def _acoustic_row(self, data, index: int) -> torch.Tensor:
+        frames = self._acoustic_frames(data)
+        if frames is not None:
+            return frames[index]
+        return data.acoustic_rows[index]
+
+    def thinker_ready(self, data) -> bool:
+        if self._acoustic_frames(data) is not None:
+            return True
+        return len(data.acoustic_rows) > len(data.req.output_ids)
+
     def _prefill_rows(self, data) -> torch.Tensor:
         embeddings = self.model.llm.get_input_embeddings()
         text = embeddings(data.input_ids.to(embeddings.weight.device))
-        acoustic = self._acoustic_frames(data)[: text.shape[0]].to(
-            device=text.device, dtype=text.dtype
-        )
+        frames = self._acoustic_frames(data)
+        if frames is None:
+            frames = torch.stack(list(data.acoustic_rows)[: text.shape[0]])
+        acoustic = frames[: text.shape[0]].to(device=text.device, dtype=text.dtype)
         return self.model.fusion(acoustic, text)
 
     def _decode_row(self, data, device, dtype) -> torch.Tensor:
@@ -56,7 +68,7 @@ class NemotronVoiceChatModelRunner(ModelRunner):
             device=embeddings.weight.device,
         )
         text, function = embeddings(tokens).to(device=device, dtype=dtype)
-        acoustic = self._acoustic_frames(data)[frame_index].to(device=device, dtype=dtype)
+        acoustic = self._acoustic_row(data, frame_index).to(device=device, dtype=dtype)
         return self.model.fusion(acoustic, text, function)
 
     def _record_function_ids(self, requests) -> None:
@@ -64,10 +76,21 @@ class NemotronVoiceChatModelRunner(ModelRunner):
         for request, token in zip(requests, sampled):
             request.data.extra_model_outputs.setdefault("function_ids", []).append(token)
 
+    @staticmethod
+    def _record_stream_tokens(result, requests) -> None:
+        # Sampling has not happened yet in the post hooks; the thinker decodes
+        # greedily, so the argmax IS the token the sampler will record.
+        logits = result.logits_output.next_token_logits
+        sampled = logits[: len(requests)].argmax(dim=-1).tolist()
+        for request, token in zip(requests, sampled):
+            request.data.pending_stream_tokens.append(int(token))
+
     def post_prefill(self, result, forward_batch, schedule_batch, requests) -> None:
-        del result, forward_batch, schedule_batch
+        del forward_batch, schedule_batch
         self._record_function_ids(requests)
+        self._record_stream_tokens(result, requests)
 
     def post_decode(self, result, forward_batch, schedule_batch, requests) -> None:
-        del result, forward_batch, schedule_batch
+        del forward_batch, schedule_batch
         self._record_function_ids(requests)
+        self._record_stream_tokens(result, requests)
