@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.models.nemotron_h import NemotronHForCausalLM
 from sglang.srt.model_loader.weight_utils import default_weight_loader
