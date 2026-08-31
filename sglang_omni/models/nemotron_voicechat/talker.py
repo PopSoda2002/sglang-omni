@@ -4,7 +4,9 @@ import torch
 from torch import nn
 from torch.nn import functional
 
+from sglang.srt.models.gemma3_causal import Gemma3ForCausalLM
 from sglang.srt.server_args import get_global_server_args
+from transformers import T5GemmaConfig, T5GemmaEncoderModel, T5GemmaModuleConfig
 
 from sglang_omni.models.nemotron_voicechat.mog_head import MoGHead, RMSNorm
 
@@ -84,8 +86,6 @@ class TalkerEmbedding(nn.Module):
 
 
 def build_char_encoder(config: dict) -> nn.Module:
-    from transformers import T5GemmaConfig, T5GemmaEncoderModel, T5GemmaModuleConfig
-
     encoder_config = T5GemmaModuleConfig(**config["encoder"], vocab_size=1)
     model = T5GemmaEncoderModel(
         T5GemmaConfig(encoder=encoder_config, decoder=encoder_config, is_encoder_decoder=False)
@@ -172,8 +172,6 @@ class NemotronVoiceChatTalker(nn.Module):
     def __init__(self, *, config, quant_config=None, prefix: str = "") -> None:
         super().__init__()
         del prefix
-        from sglang.srt.models.gemma3_causal import Gemma3ForCausalLM
-
         self.config = config
         speech = config.nemotron_speech
         tts_config = speech["tts_config"]

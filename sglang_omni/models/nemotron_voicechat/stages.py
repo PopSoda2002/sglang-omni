@@ -9,6 +9,7 @@ from torch import nn
 
 from sglang_omni.models.nemotron_voicechat.conformer import AudioPerception
 from sglang_omni.models.nemotron_voicechat.code2wav_stream import NemotronCode2WavScheduler
+from sglang_omni.models.nemotron_voicechat.codec import RVQVAEDecoder
 from sglang_omni.models.nemotron_voicechat.engine_builder import (
     NemotronVoiceChatEngineBuilder,
     NemotronVoiceChatTalkerEngineBuilder,
@@ -113,8 +114,6 @@ def create_talker_executor(model_path, *, dtype=None, device=None, gpu_id=None, 
 
 
 def create_code2wav_executor(model_path, *, dtype=None, device=None):
-    from sglang_omni.models.nemotron_voicechat.codec import RVQVAEDecoder
-
     device = resolve_device_spec(device)
     generation = _speech_generation_config(model_path)
     weights = load_weights_by_prefix(model_path, prefix=("tts_model.audio_codec.",))

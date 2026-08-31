@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from transformers import AutoTokenizer
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.model_runner.prefill_inputs import (
@@ -20,8 +21,6 @@ def char_vocab_from_tokenizer(tokenizer) -> dict[str, int]:
 class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def __init__(self, tp_worker, output_processor):
         super().__init__(tp_worker, output_processor)
-        from transformers import AutoTokenizer
-
         speech = self.model.config.nemotron_speech
         self.tokenizer = AutoTokenizer.from_pretrained(speech["tokenizer_name"])
         self.char_vocab = char_vocab_from_tokenizer(self.tokenizer)
