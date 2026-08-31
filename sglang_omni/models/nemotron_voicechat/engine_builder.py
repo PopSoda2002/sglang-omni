@@ -2,49 +2,84 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+
+from sglang.kernels.ops.mamba.triton_ops import initialize_mamba_selective_state_update_backend
 
 from sglang_omni.models.nemotron_voicechat.hf_config import (
     VOICECHAT_MODEL_ARCH_OVERRIDE,
     NemotronVoiceChatConfig,
     register_voicechat_hf_config,
 )
-from sglang_omni.models.weight_loader import resolve_model_path
-from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 from sglang_omni.models.nemotron_voicechat.model_runner import NemotronVoiceChatModelRunner
 from sglang_omni.models.nemotron_voicechat.request_builders import (
+    apply_talker_result,
     apply_thinker_result,
+    build_talker_request,
     build_thinker_request,
+    talker_stream_output_builder,
+    thinker_stream_output_builder,
 )
-from sglang.kernels.ops.mamba.triton_ops import initialize_mamba_selective_state_update_backend
+from sglang_omni.models.nemotron_voicechat.talker import TALKER_ARCH
+from sglang_omni.models.nemotron_voicechat.talker_model_runner import (
+    NemotronVoiceChatTalkerModelRunner,
+)
+from sglang_omni.models.nemotron_voicechat.talker_scheduler import NemotronTalkerScheduler
+from sglang_omni.models.nemotron_voicechat.thinker_scheduler import NemotronThinkerScheduler
+from sglang_omni.models.weight_loader import resolve_model_path
+from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
-SHIM_DIR = Path.home() / ".cache" / "sglang-omni" / "voicechat"
+CACHE_ROOT = Path.home() / ".cache" / "sglang-omni"
+TALKER_SPEAKER = "Aria"
+TALKER_PROMPT_FRAMES = 37
+TALKER_PLACEHOLDER_VOCAB = 8
 
-def _config_shim(model_path):
-    SHIM_DIR.mkdir(parents=True, exist_ok=True)
-    source = Path(model_path)
+
+def _shim_dir(name: str, source: Path) -> Path:
+    shim = CACHE_ROOT / name
+    shim.mkdir(parents=True, exist_ok=True)
     for entry in source.iterdir():
-        link = SHIM_DIR / entry.name
+        link = shim / entry.name
         if entry.name != "config.json" and not link.exists():
             link.symlink_to(entry)
-    config = NemotronVoiceChatConfig.from_dict(json.loads((source / "config.json").read_text()))
-    (SHIM_DIR / "config.json").write_text(config.to_json_string())
-    return str(SHIM_DIR)
+    return shim
 
-class NemotronVoiceChatEngineBuilder(TtsEngineBuilder):
-    model_name = "nemotron-voicechat"
-    context_length = 8192
 
-    def __init__(self, *, max_running_requests = 1):
-        self.model_arch_override = VOICECHAT_MODEL_ARCH_OVERRIDE
+def _talker_config(source: Path) -> dict:
+    speech = json.loads((source / "config.json").read_text())["model"]["speech_generation"]["model"]
+    backbone = speech["tts_config"]["backbone_config"]
+    return {
+        "model_type": "gemma3_text",
+        "architectures": [TALKER_ARCH],
+        "hidden_size": backbone["hidden_size"],
+        "intermediate_size": backbone["intermediate_size"],
+        "num_hidden_layers": backbone["num_hidden_layers"],
+        "num_attention_heads": backbone["num_attention_heads"],
+        "num_key_value_heads": backbone["num_key_value_heads"],
+        "head_dim": backbone["head_dim"],
+        "sliding_window": backbone["sliding_window"],
+        "attention_dropout": 0.0,
+        "vocab_size": TALKER_PLACEHOLDER_VOCAB,
+        "torch_dtype": "bfloat16",
+        "nemotron_speech": {
+            "tts_config": speech["tts_config"],
+            "codec_config": speech["codec_config"],
+            "inference_top_p_or_k": speech["inference_top_p_or_k"],
+            "inference_noise_scale": speech["inference_noise_scale"],
+            "inference_force_speech_silence_on_eos": speech["inference_force_speech_silence_on_eos"],
+            "tokenizer_name": speech["tts_config"]["cas_config"]["pretrained_tokenizer_name"],
+            "text_vocab_size": 131072,
+            "char_vocab_size": 256,
+            "speaker": TALKER_SPEAKER,
+            "prompt_frames": TALKER_PROMPT_FRAMES,
+        },
+    }
+
+
+class _VoiceChatEngineBuilder(TtsEngineBuilder):
+    scheduler_class: type
+
+    def __init__(self, *, max_running_requests: int = 1) -> None:
         self.max_running_requests = max_running_requests
-
-    def resolve_checkpoint(self, model_path):
-        return _config_shim(resolve_model_path(model_path))
-
-    def pre_infra_setup(self, checkpoint_dir):
-        del checkpoint_dir
-        register_voicechat_hf_config()
 
     def generation_defaults(self, *, dtype):
         return {
@@ -58,17 +93,91 @@ class NemotronVoiceChatEngineBuilder(TtsEngineBuilder):
             "trust_remote_code": False,
         }
 
-    def make_model_runner(self, model_worker, output_proc):
-        return NemotronVoiceChatModelRunner(model_worker, output_proc)
-
     def setup_model(self, *, model_worker, checkpoint_dir, device, gpu_id, server_args):
         del model_worker, checkpoint_dir, device, gpu_id, server_args
+
+    def make_scheduler(self, **kwargs):
+        extra = kwargs.pop("extra_scheduler_kwargs", None) or self.extra_scheduler_kwargs()
+        return self.scheduler_class(
+            tp_worker=kwargs.pop("model_worker"),
+            abort_callback=self.make_abort_callback(),
+            request_finished_callback=self.make_request_finished_callback(),
+            **kwargs,
+            **extra,
+        )
+
+
+class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
+    model_name = "nemotron-voicechat"
+    context_length = 8192
+    scheduler_class = NemotronThinkerScheduler
+
+    def __init__(self, *, max_running_requests: int = 1) -> None:
+        super().__init__(max_running_requests=max_running_requests)
+        self.model_arch_override = VOICECHAT_MODEL_ARCH_OVERRIDE
+
+    def resolve_checkpoint(self, model_path):
+        source = Path(resolve_model_path(model_path))
+        shim = _shim_dir("voicechat", source)
+        config = NemotronVoiceChatConfig.from_dict(json.loads((source / "config.json").read_text()))
+        (shim / "config.json").write_text(config.to_json_string())
+        return str(shim)
+
+    def pre_infra_setup(self, checkpoint_dir):
+        del checkpoint_dir
+        register_voicechat_hf_config()
 
     def customize_server_args(self, server_args):
         initialize_mamba_selective_state_update_backend(server_args)
 
+    def make_model_runner(self, model_worker, output_proc):
+        return NemotronVoiceChatModelRunner(model_worker, output_proc)
+
     def make_adapters(self, model):
         vocab_size = int(model.llm.config.vocab_size)
+
         def build(payload):
             return build_thinker_request(payload, vocab_size=vocab_size)
+
         return build, apply_thinker_result
+
+    def extra_scheduler_kwargs(self):
+        return {"stream_output_builder": thinker_stream_output_builder}
+
+
+class NemotronVoiceChatTalkerEngineBuilder(_VoiceChatEngineBuilder):
+    model_name = "nemotron-voicechat-talker"
+    context_length = 4096
+    scheduler_class = NemotronTalkerScheduler
+
+    def __init__(self, *, max_running_requests: int = 1, context_length: int | None = None) -> None:
+        super().__init__(max_running_requests=max_running_requests)
+        self.model_arch_override = TALKER_ARCH
+        if context_length is not None:
+            self.context_length = int(context_length)
+
+    def resolve_checkpoint(self, model_path):
+        source = Path(resolve_model_path(model_path))
+        shim = _shim_dir("voicechat-talker", source)
+        (shim / "config.json").write_text(json.dumps(_talker_config(source)))
+        return str(shim)
+
+    def generation_defaults(self, *, dtype):
+        defaults = super().generation_defaults(dtype=dtype or "bfloat16")
+        defaults["mem_fraction_static"] = 0.35
+        return defaults
+
+    def make_model_runner(self, model_worker, output_proc):
+        return NemotronVoiceChatTalkerModelRunner(model_worker, output_proc)
+
+    def make_adapters(self, model):
+        vocab_size = int(model.config.vocab_size)
+        prompt_frames = int(model.audio_prompt_latent.shape[0])
+
+        def build(payload):
+            return build_talker_request(payload, vocab_size=vocab_size, prompt_frames=prompt_frames)
+
+        return build, apply_talker_result
+
+    def extra_scheduler_kwargs(self):
+        return {"stream_output_builder": talker_stream_output_builder}

@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import torch
 
-from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
-from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.sampling.sampling_params import SamplingParams
 
-PAD_TOKEN_ID = 12
-BOS_TOKEN_ID = 1
+from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
+from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.messages import OutgoingMessage
+from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 
-def build_thinker_request(payload: StagePayload, *, vocab_size: int) -> SGLangARRequestData:
-    state = NemotronVoiceChatState.from_dict(payload.data)
-    num_frames = state.num_frames
-    input_ids = [BOS_TOKEN_ID]
+BOS_TOKEN_ID = 1
+TALKER_PLACEHOLDER_ID = 0
+
+
+def _ar_request(payload: StagePayload, *, input_ids: list[int], max_new_tokens: int,
+                vocab_size: int) -> SGLangARRequestData:
     sampling_params = SamplingParams(
-        max_new_tokens=num_frames,
+        max_new_tokens=max_new_tokens,
         temperature=0.0,
         ignore_eos=True,
     )
@@ -32,9 +33,20 @@ def build_thinker_request(payload: StagePayload, *, vocab_size: int) -> SGLangAR
         req=req,
         input_ids=torch.tensor(input_ids, dtype=torch.long),
         stage_payload=payload,
-        max_new_tokens=num_frames,
+        max_new_tokens=max_new_tokens,
         temperature=0.0,
     )
+
+
+def build_thinker_request(payload: StagePayload, *, vocab_size: int) -> SGLangARRequestData:
+    num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
+    data = _ar_request(
+        payload, input_ids=[BOS_TOKEN_ID], max_new_tokens=num_frames, vocab_size=vocab_size,
+    )
+    data.acoustic_rows = []
+    data.pending_stream_tokens = []
+    return data
+
 
 def apply_thinker_result(data: SGLangARRequestData) -> StagePayload:
     payload = data.stage_payload
@@ -45,3 +57,61 @@ def apply_thinker_result(data: SGLangARRequestData) -> StagePayload:
     return payload
 
 
+def thinker_stream_output_builder(request_id: str, data: SGLangARRequestData, req_output) -> list[OutgoingMessage]:
+    del req_output
+    tokens = data.pending_stream_tokens
+    data.pending_stream_tokens = []
+    return [
+        OutgoingMessage(
+            request_id=request_id,
+            type="stream",
+            data=int(token),
+            target="talker",
+            metadata={"modality": "text_token"},
+        )
+        for token in tokens
+    ]
+
+
+def build_talker_request(payload: StagePayload, *, vocab_size: int, prompt_frames: int) -> SGLangARRequestData:
+    num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
+    return _ar_request(
+        payload,
+        input_ids=[TALKER_PLACEHOLDER_ID] * prompt_frames,
+        max_new_tokens=num_frames + 1,
+        vocab_size=vocab_size,
+    )
+
+
+def apply_talker_result(data: SGLangARRequestData) -> StagePayload:
+    payload = data.stage_payload
+    state = NemotronVoiceChatState.from_dict(payload.data)
+    state.codes = torch.stack(data.talker_model_inputs["codes_rows"]).cpu()
+    payload.data = state.to_dict()
+    return payload
+
+
+def talker_stream_output_builder(request_id: str, data: SGLangARRequestData, req_output) -> list[OutgoingMessage]:
+    del req_output
+    codes = data.talker_model_inputs.pop("stream_chunk", None)
+    if codes is None:
+        return []
+    return [
+        OutgoingMessage(
+            request_id=request_id,
+            type="stream",
+            data=codes,
+            target="code2wav",
+            metadata={"modality": "audio_codes"},
+        )
+    ]
+
+
+def merge_for_talker(payloads: dict) -> StagePayload:
+    payload = payloads["perception"]
+    state = NemotronVoiceChatState.from_dict(payload.data)
+    return StagePayload(
+        request_id=payload.request_id,
+        request=payload.request,
+        data=NemotronVoiceChatState(num_frames=state.num_frames).to_dict(),
+    )

@@ -8,9 +8,13 @@ from einops import rearrange
 from torch import nn
 
 from sglang_omni.models.nemotron_voicechat.conformer import AudioPerception
-from sglang_omni.models.nemotron_voicechat.engine_builder import NemotronVoiceChatEngineBuilder
+from sglang_omni.models.nemotron_voicechat.code2wav_stream import NemotronCode2WavScheduler
+from sglang_omni.models.nemotron_voicechat.engine_builder import (
+    NemotronVoiceChatEngineBuilder,
+    NemotronVoiceChatTalkerEngineBuilder,
+)
 from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
-from sglang_omni.models.weight_loader import load_module, resolve_dtype, resolve_model_path
+from sglang_omni.models.weight_loader import load_module, load_weights_by_prefix, resolve_dtype, resolve_model_path
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
@@ -90,3 +94,53 @@ def create_thinker_executor(model_path, *, dtype=None, device=None, gpu_id=None,
         dtype=dtype or "float32",
         server_args_overrides=overrides or None,
     )
+
+def _speech_generation_config(model_path: str) -> dict:
+    config_path = Path(resolve_model_path(model_path)) / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return config["model"]["speech_generation"]["model"]
+
+
+def create_talker_executor(model_path, *, dtype=None, device=None, gpu_id=None, context_length=None, **overrides):
+    builder = NemotronVoiceChatTalkerEngineBuilder(max_running_requests=1, context_length=context_length)
+    return builder.build(
+        model_path,
+        device=device,
+        gpu_id=gpu_id,
+        dtype=dtype or "bfloat16",
+        server_args_overrides=overrides or None,
+    )
+
+
+def create_code2wav_executor(model_path, *, dtype=None, device=None):
+    from sglang_omni.models.nemotron_voicechat.codec import RVQVAEDecoder
+
+    device = resolve_device_spec(device)
+    generation = _speech_generation_config(model_path)
+    weights = load_weights_by_prefix(model_path, prefix=("tts_model.audio_codec.",))
+    decoder_weights = {
+        key: value
+        for key, value in weights.items()
+        if key.startswith("decoder.") or key.startswith("prvq.mus_list.")
+    }
+    decoder = RVQVAEDecoder(generation["codec_config"])
+    decoder.load_state_dict(decoder_weights, strict=True)
+    decoder = decoder.to(device=device, dtype=resolve_dtype(dtype)).eval()
+
+    @torch.inference_mode()
+    def decode(payload: StagePayload) -> StagePayload:
+        state = NemotronVoiceChatState.from_dict(payload.data)
+        state.output_waveform = decoder(state.codes.to(device)).float().cpu()
+        payload.data = state.to_dict()
+        return payload
+
+    return NemotronCode2WavScheduler(decoder, device, compute_fn=decode)
+
+
+def create_decode_executor(model_path, **_):
+    del model_path
+
+    def passthrough(payload: StagePayload) -> StagePayload:
+        return payload
+
+    return SimpleScheduler(passthrough)
