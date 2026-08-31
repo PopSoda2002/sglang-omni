@@ -4,7 +4,9 @@ import torch
 from torch import nn
 from torch.nn import functional
 
-from sglang_omni.models.nemotron_voicechat.mog_head import RMSNorm
+from sglang.srt.server_args import get_global_server_args
+
+from sglang_omni.models.nemotron_voicechat.mog_head import MoGHead, RMSNorm
 
 
 class SubwordFlagEmbedding(nn.Module):
@@ -160,3 +162,97 @@ class EarTtsTalker(nn.Module):
         return torch.stack(
             [padded_QCD[q][codes_TQ[:, q]] for q in range(levels)]
         ).sum(0)
+
+
+TALKER_ARCH = "NemotronVoiceChatTalker"
+TALKER_PREFIX = "tts_model.tts_model."
+
+
+class NemotronVoiceChatTalker(nn.Module):
+    def __init__(self, *, config, quant_config=None, prefix: str = "") -> None:
+        super().__init__()
+        del prefix
+        from sglang.srt.models.gemma3_causal import Gemma3ForCausalLM
+
+        self.config = config
+        speech = config.nemotron_speech
+        tts_config = speech["tts_config"]
+        codec_config = speech["codec_config"]
+        self.llm = Gemma3ForCausalLM(config=config, quant_config=quant_config)
+        talker_config = dict(
+            hidden_size=tts_config["backbone_config"]["hidden_size"],
+            vocab_size=speech["text_vocab_size"],
+            char_vocab_size=speech["char_vocab_size"],
+            num_quantizers=codec_config["num_quantizers"],
+            codebook_size=codec_config["codebook_size"],
+            latent_size=codec_config["latent_size"],
+            char_encoder_config=tts_config["cas_config"]["backbone_config"],
+        )
+        self.talker = EarTtsTalker(talker_config)
+        self.mog_head = MoGHead(dict(
+            hidden_size=talker_config["hidden_size"],
+            intermediate_size=tts_config["backbone_config"]["intermediate_size"],
+            num_layers=3,
+            num_predictions=talker_config["codebook_size"],
+            out_size=talker_config["latent_size"],
+            low_rank=64,
+        ))
+        self.register_buffer(
+            "codec_silence_tokens",
+            torch.zeros(talker_config["num_quantizers"], dtype=torch.long),
+        )
+        self.register_buffer(
+            "audio_prompt_latent",
+            torch.zeros(speech["prompt_frames"], talker_config["hidden_size"]),
+        )
+        hidden_size = talker_config["hidden_size"]
+        max_batch = get_global_server_args().max_running_requests
+        embed_dtype = torch.get_default_dtype()
+        device = "cuda"
+        self._fusion_buffer = torch.zeros(max_batch, hidden_size, dtype=embed_dtype, device=device)
+        self._fusion_mask = torch.zeros(max_batch, dtype=torch.bool, device=device)
+        self._hidden_out = torch.zeros(max_batch, hidden_size, dtype=embed_dtype, device=device)
+
+    def get_attention_sliding_window_size(self):
+        return self.llm.get_attention_sliding_window_size()
+
+    def forward(self, input_ids, positions, forward_batch, input_embeds=None, **_):
+        if input_embeds is None:
+            batch = input_ids.shape[0]
+            assert bool(self._fusion_mask[:batch].all()), (
+                "talker decode step reached the model without fused inputs"
+            )
+            input_embeds = self._fusion_buffer[:batch]
+            self._fusion_mask[:batch] = False
+        hidden = self.llm.model(input_ids, positions, forward_batch, input_embeds)
+        if forward_batch.forward_mode.is_decode():
+            self._hidden_out[: hidden.shape[0]] = hidden
+        else:
+            last_rows = torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
+            self._hidden_out[: last_rows.shape[0]] = hidden[last_rows]
+        return self.llm.logits_processor(
+            input_ids, hidden, self.llm.model.embed_tokens, forward_batch
+        )
+
+    def load_weights(self, weights):
+        speaker = self.config.nemotron_speech["speaker"]
+        prompt_key = f"tts_model.audio_prompt_latents.{speaker}"
+        backbone_weights = []
+        talker_state = {}
+        mog_state = {}
+        for name, tensor in weights:
+            if name == "tts_model.codec_silence_tokens":
+                self.codec_silence_tokens.copy_(tensor)
+            elif name == prompt_key:
+                self.audio_prompt_latent.copy_(tensor[0].to(self.audio_prompt_latent.dtype))
+            elif name.startswith(TALKER_PREFIX):
+                local = name[len(TALKER_PREFIX):]
+                if local.startswith("backbone."):
+                    backbone_weights.append(("model." + local[len("backbone."):], tensor))
+                elif local.startswith("mog_head."):
+                    mog_state[local[len("mog_head."):]] = tensor
+                else:
+                    talker_state[local] = tensor
+        self.llm.load_weights(backbone_weights)
+        self.talker.load_state_dict(talker_state, strict=True)
+        self.mog_head.load_state_dict(mog_state, strict=True)
