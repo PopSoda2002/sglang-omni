@@ -452,7 +452,7 @@ class SGLModelRunner(ModelRunner):
             "DotsTTSForConditionalGeneration": "sglang_omni.models.dots_tts.sglang_model:DotsTTSSGLangModel",
             "FunCosyVoice3SGLangModel": "sglang_omni.models.fun_cosyvoice3.sglang_model:FunCosyVoice3SGLangModel",
             "NemotronVoiceChatForCausalLM": "sglang_omni.models.nemotron_voicechat.thinker:NemotronVoiceChatForCausalLM",
-            "NemotronVoiceChatTalker": "sglang_omni.models.nemotron_voicechat.talker_sglang_ref:NemotronVoiceChatTalker",
+            "NemotronVoiceChatTalker": "sglang_omni.models.nemotron_voicechat.talker:NemotronVoiceChatTalker",
         }
         for arch, path in sglang_omni_models.items():
             module_path, _, attr = path.partition(":")
