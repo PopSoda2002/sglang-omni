@@ -40,11 +40,8 @@ def _engine_worker_main(kind, model_path, gpu_id, context_length, address, authk
                         listen: bool = False):
 
     warnings.filterwarnings("ignore")
-    if listen:
-        listener = Listener(address, authkey=bytes.fromhex(authkey_hex))
-        connection = listener.accept()
-        listener.close()
-    else:
+    connection = None
+    if not listen:
         connection = Client(address, authkey=bytes.fromhex(authkey_hex))
     torch.cuda.set_device(gpu_id)
 
@@ -64,6 +61,12 @@ def _engine_worker_main(kind, model_path, gpu_id, context_length, address, authk
         scheduler.start()
 
     threading.Thread(target=run_scheduler, daemon=True).start()
+    if listen:
+        # Server mode: the engine is up before the socket opens, so a
+        # reachable address means an attachable engine.
+        listener = Listener(address, authkey=bytes.fromhex(authkey_hex))
+        connection = listener.accept()
+        listener.close()
     connection.send(OutgoingMessage(request_id="", type="ready", data=kind))
 
     def feed():
@@ -110,7 +113,7 @@ class _RemoteEngine:
             listener = Listener(address, authkey=bytes.fromhex(authkey))
             self.process = subprocess.Popen([
                 sys.executable, "-u", "-c",
-                "from sglang_omni.serve.realtime.frame_session_ref import _engine_worker_main;"
+                "from sglang_omni.serve.realtime.frame_session import _engine_worker_main;"
                 f"_engine_worker_main({kind!r}, {model_path!r}, {gpu_id}, {context_length!r}, {address!r}, {authkey!r})",
             ])
             self._connection = listener.accept()

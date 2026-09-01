@@ -13,7 +13,7 @@ from starlette.websockets import WebSocketState
 from transformers import AutoTokenizer
 
 from sglang_omni.serve.realtime.events import SessionObject, make_event
-from sglang_omni.serve.realtime.frame_session_ref import (
+from sglang_omni.serve.realtime.frame_session import (
     SAMPLES_PER_FRAME,
     DuplexEngines,
     FrameSession,
