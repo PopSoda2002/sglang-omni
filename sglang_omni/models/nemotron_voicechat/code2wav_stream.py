@@ -4,6 +4,7 @@ import torch
 
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
+from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.scheduling.streaming_simple_scheduler import StreamingSimpleScheduler
 
 OUTPUT_SAMPLE_RATE = 22_050
@@ -72,15 +73,18 @@ class NemotronCode2WavScheduler(StreamingSimpleScheduler):
         state = self._states.setdefault(request_id, self._new_state())
         tail = state.codec.push(item.data)
         state.audio_parts.append(tail)
+        # Chunks to the coordinator are msgpack'd, so the waveform travels in
+        # the shared payload format rather than as a tensor.
         return [
             OutgoingMessage(
                 request_id=request_id,
                 type="stream",
-                data={
-                    "modality": "audio",
-                    "sample_rate": OUTPUT_SAMPLE_RATE,
-                    "samples": tail,
-                },
+                data=audio_waveform_payload(
+                    tail,
+                    sample_rate=OUTPUT_SAMPLE_RATE,
+                    modality="audio",
+                    source_hint="NemotronVoiceChat",
+                ),
                 metadata={"modality": "audio"},
             )
         ]
@@ -98,7 +102,10 @@ class NemotronCode2WavScheduler(StreamingSimpleScheduler):
                 messages.append(OutgoingMessage(
                     request_id=request_id,
                     type="stream",
-                    data={"modality": "audio", "sample_rate": OUTPUT_SAMPLE_RATE, "samples": tail},
+                    data=audio_waveform_payload(
+                        tail, sample_rate=OUTPUT_SAMPLE_RATE, modality="audio",
+                        source_hint="NemotronVoiceChat",
+                    ),
                     metadata={"modality": "audio"},
                 ))
         waveform = torch.cat(state.audio_parts) if state.audio_parts else torch.zeros(0)
@@ -109,12 +116,10 @@ class NemotronCode2WavScheduler(StreamingSimpleScheduler):
                 data=StagePayload(
                     request_id=request_id,
                     request=self._stream_payloads[request_id].request,
-                    data={
-                        "modality": "audio",
-                        "sample_rate": OUTPUT_SAMPLE_RATE,
-                        "num_samples": int(waveform.numel()),
-                        "audio_data": waveform,
-                    },
+                    data=audio_waveform_payload(
+                        waveform, sample_rate=OUTPUT_SAMPLE_RATE, modality="audio",
+                        source_hint="NemotronVoiceChat",
+                    ),
                 ),
             )
         ]

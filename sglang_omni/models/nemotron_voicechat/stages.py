@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from einops import rearrange
+from transformers import AutoTokenizer
 from torch import nn
 
 from sglang_omni.models.nemotron_voicechat.conformer import AudioPerception
@@ -14,11 +15,15 @@ from sglang_omni.models.nemotron_voicechat.engine_builder import (
     NemotronVoiceChatEngineBuilder,
     NemotronVoiceChatTalkerEngineBuilder,
 )
-from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
+from sglang_omni.models.nemotron_voicechat.payload_types import (
+    OUTPUT_SAMPLE_RATE,
+    NemotronVoiceChatState,
+)
 from sglang_omni.models.weight_loader import load_module, load_weights_by_prefix, resolve_dtype, resolve_model_path
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.utils.device import resolve_device_spec
 
 PERCEPTION_PREFIX = "stt_model.perception."
@@ -131,18 +136,41 @@ def create_code2wav_executor(model_path, *, dtype=None, device=None):
 
     @torch.inference_mode()
     def decode(payload: StagePayload) -> StagePayload:
+        """Decode a whole code stack at once.
+
+        The talker normally streams its codes, and the scheduler renders those
+        incrementally; this is the path for a reply that arrives with no
+        chunks at all, and it answers in the same shape.
+        """
         state = NemotronVoiceChatState.from_dict(payload.data)
-        state.output_waveform = decoder(state.codes.to(device)).float().cpu()
-        payload.data = state.to_dict()
+        waveform = decoder(state.codes.to(device)).float().cpu()
+        payload.data = audio_waveform_payload(
+            waveform, sample_rate=OUTPUT_SAMPLE_RATE, modality="audio",
+            source_hint="NemotronVoiceChat",
+        )
         return payload
 
     return NemotronCode2WavScheduler(decoder, device, compute_fn=decode)
 
 
 def create_decode_executor(model_path, **_):
-    del model_path
+    """Turn the thinker's frame-locked token timeline into the reply text.
 
-    def passthrough(payload: StagePayload) -> StagePayload:
+    Most frames carry a marker rather than a word — the model is listening, or
+    punctuating a turn — so only the ids that spell something are detokenized.
+    """
+    speech = _speech_generation_config(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        speech["tts_config"]["cas_config"]["pretrained_tokenizer_name"]
+    )
+    silent_ids = set(tokenizer.all_special_ids) | {
+        tokenizer.convert_tokens_to_ids(token) for token in ("<s>", "</s>")
+    }
+
+    def detokenize(payload: StagePayload) -> StagePayload:
+        state = NemotronVoiceChatState.from_dict(payload.data)
+        spoken = [int(i) for i in state.text_ids if int(i) not in silent_ids]
+        payload.data = {"text": tokenizer.decode(spoken) if spoken else ""}
         return payload
 
-    return SimpleScheduler(passthrough)
+    return SimpleScheduler(detokenize)

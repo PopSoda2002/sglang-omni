@@ -29,7 +29,7 @@ from sglang_omni.models.nemotron_voicechat.talker_model_runner import (
     NemotronVoiceChatTalkerModelRunner,
 )
 from sglang_omni.models.nemotron_voicechat.talker_scheduler import NemotronTalkerScheduler
-from sglang_omni.models.nemotron_voicechat.thinker_scheduler import NemotronThinkerScheduler
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.models.weight_loader import resolve_model_path
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
@@ -116,7 +116,7 @@ class _VoiceChatEngineBuilder(TtsEngineBuilder):
 class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
     model_name = "nemotron-voicechat"
     context_length = 8192
-    scheduler_class = NemotronThinkerScheduler
+    scheduler_class = OmniScheduler
 
     def __init__(self, *, max_running_requests: int = 1) -> None:
         super().__init__(max_running_requests=max_running_requests)

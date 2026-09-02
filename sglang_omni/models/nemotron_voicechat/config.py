@@ -24,18 +24,21 @@ def nemotron_voicechat_stages_factory() -> list[StageConfig]:
         ),
         StageConfig(
             name="perception",
-            process="perception",
+            process="pipeline",
             factory=f"{MODEL_STAGES_PREFIX}.create_perception_executor",
             factory_args={"dtype": MODEL_DTYPE},
             gpu=0,
             runtime=StageRuntimeConfig(
                 resources=StageResourceConfig(total_gpu_memory_fraction=0.12)
             ),
-            next="thinker",
+            # The talker builds its request by merging this payload
+            # (wait_for/merge_fn); nothing fans out to a wait_for consumer on
+            # its own, so both destinations are named here.
+            next=["thinker", "talker"],
         ),
         StageConfig(
             name="thinker",
-            process="thinker",
+            process="pipeline",
             factory=f"{MODEL_STAGES_PREFIX}.create_thinker_executor",
             # NemotronH runs under SGLang, whose rmsnorm kernel has no float32
             # path; the rest of the chain keeps the checkpoint's precision.
@@ -70,7 +73,7 @@ def nemotron_voicechat_stages_factory() -> list[StageConfig]:
         ),
         StageConfig(
             name="code2wav",
-            process="code2wav",
+            process="talker",
             factory=f"{MODEL_STAGES_PREFIX}.create_code2wav_executor",
             factory_args={"dtype": MODEL_DTYPE},
             gpu=0,

@@ -184,7 +184,6 @@ class StreamingPerception:
 
         preprocessor = perception.preprocessor
         assert SAMPLES_PER_FRAME % preprocessor.hop_length == 0
-        self.mels_per_frame = SAMPLES_PER_FRAME // preprocessor.hop_length
 
         encoder = perception.encoder
         convs = list(encoder.pre_encode.conv)

@@ -40,29 +40,10 @@ class NemotronVoiceChatModelRunner(ModelRunner):
         return NemotronVoiceChatState.from_dict(data.stage_payload.data).acoustic_frames
 
     def _acoustic_row(self, data, index: int) -> torch.Tensor:
-        frames = self._acoustic_frames(data)
-        if frames is not None:
-            return frames[index]
-        return data.acoustic_rows[index]
-
-    def thinker_ready(self, data) -> bool:
-        if self._acoustic_frames(data) is not None:
-            return True
-        return len(data.acoustic_rows) > len(data.req.output_ids)
+        return self._acoustic_frames(data)[index]
 
     def _prefill_rows(self, data) -> torch.Tensor:
-        if data.prompt_len:
-            return self._opening_rows(data)
-        embeddings = self.model.llm.get_input_embeddings()
-        text = embeddings(data.input_ids.to(embeddings.weight.device))
-        frames = self._acoustic_frames(data)
-        if frames is None:
-            frames = torch.stack(list(data.acoustic_rows)[: text.shape[0]])
-        acoustic = frames[: text.shape[0]].to(device=text.device, dtype=text.dtype)
-        return self.model.fusion(acoustic, text)
-
-    def _opening_rows(self, data) -> torch.Tensor:
-        """What the conversation's first forward carries.
+        """What the request's first forward carries.
 
         The instruction rides the same channel the caller's audio does — it is
         what the model has heard so far — and the text and function channels

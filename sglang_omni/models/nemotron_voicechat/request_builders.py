@@ -55,9 +55,7 @@ def build_thinker_request(payload: StagePayload, *, vocab_size: int,
     data = _ar_request(
         payload, input_ids=opening, max_new_tokens=num_frames, vocab_size=vocab_size,
     )
-    data.acoustic_rows = []
     data.pending_stream_tokens = []
-    data.prompt_len = len(prompt_token_ids)
     return data
 
 
@@ -65,7 +63,6 @@ def apply_thinker_result(data: SGLangARRequestData) -> StagePayload:
     payload = data.stage_payload
     state = NemotronVoiceChatState.from_dict(payload.data)
     state.text_ids = list(data.output_ids)
-    state.function_ids = list(data.extra_model_outputs.get("function_ids", ()))
     payload.data = state.to_dict()
     return payload
 
