@@ -10,7 +10,9 @@ logger = logging.getLogger(__name__)
 class NemotronTalkerScheduler(OmniScheduler):
     @staticmethod
     def _append_stream_chunk_default(req_data, chunk) -> None:
-        req_data.pending_text_queue.append(int(chunk.data))
+        # The thinker ships each text token as a one-element tensor, because
+        # that is what crosses the relay between stage processes.
+        req_data.pending_text_queue.append(int(chunk.data.reshape(-1)[0]))
 
     @staticmethod
     def _mark_stream_done(req_data) -> None:

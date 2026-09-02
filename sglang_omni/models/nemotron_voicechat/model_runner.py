@@ -8,6 +8,7 @@ from sglang_omni.model_runner.prefill_inputs import (
     attach_omni_prefill_inputs,
 )
 from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
+from sglang_omni.models.nemotron_voicechat.request_builders import TEXT_PAD_ID
 
 class NemotronVoiceChatModelRunner(ModelRunner):
     def before_prefill(self, forward_batch, schedule_batch, requests) -> None:
@@ -50,6 +51,8 @@ class NemotronVoiceChatModelRunner(ModelRunner):
         return len(data.acoustic_rows) > len(data.req.output_ids)
 
     def _prefill_rows(self, data) -> torch.Tensor:
+        if data.prompt_len:
+            return self._opening_rows(data)
         embeddings = self.model.llm.get_input_embeddings()
         text = embeddings(data.input_ids.to(embeddings.weight.device))
         frames = self._acoustic_frames(data)
@@ -57,6 +60,32 @@ class NemotronVoiceChatModelRunner(ModelRunner):
             frames = torch.stack(list(data.acoustic_rows)[: text.shape[0]])
         acoustic = frames[: text.shape[0]].to(device=text.device, dtype=text.dtype)
         return self.model.fusion(acoustic, text)
+
+    def _opening_rows(self, data) -> torch.Tensor:
+        """What the conversation's first forward carries.
+
+        The instruction rides the same channel the caller's audio does — it is
+        what the model has heard so far — and the text and function channels
+        are padding, because the model has not said anything yet. The last
+        position is this frame's audio, which is why the request carries one
+        token more than the prompt.
+        """
+        embeddings = self.model.llm.get_input_embeddings()
+        device = embeddings.weight.device
+        ids = data.input_ids.to(device)
+        row = self._acoustic_row(data, 0)
+        spoken = embeddings(ids[:-1])
+        heard = torch.cat(
+            [spoken, row.to(device=spoken.device, dtype=spoken.dtype).reshape(1, -1)],
+            dim=0,
+        )
+        pad = embeddings(torch.full_like(ids, TEXT_PAD_ID))
+        fusion = self.model.fusion
+        return (
+            pad * fusion.text_weight
+            + heard * fusion.user_weight
+            + pad * fusion.function_weight
+        )
 
     def _decode_row(self, data, device, dtype) -> torch.Tensor:
         output_ids = data.req.output_ids

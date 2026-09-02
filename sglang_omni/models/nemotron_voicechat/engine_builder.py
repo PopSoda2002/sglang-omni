@@ -11,7 +11,12 @@ from sglang_omni.models.nemotron_voicechat.hf_config import (
     register_voicechat_hf_config,
 )
 from sglang_omni.models.nemotron_voicechat.model_runner import NemotronVoiceChatModelRunner
+from transformers import AutoTokenizer
+
 from sglang_omni.models.nemotron_voicechat.request_builders import (
+    SYSTEM_PROMPT,
+    TEXT_BOS_ID,
+    TEXT_EOS_ID,
     apply_talker_result,
     apply_thinker_result,
     build_talker_request,
@@ -82,7 +87,7 @@ class _VoiceChatEngineBuilder(TtsEngineBuilder):
         self.max_running_requests = max_running_requests
 
     def generation_defaults(self, *, dtype):
-        return {
+        defaults = {
             "disable_cuda_graph": True,
             "disable_overlap_schedule": True,
             "disable_radix_cache": True,
@@ -92,6 +97,7 @@ class _VoiceChatEngineBuilder(TtsEngineBuilder):
             "dtype": dtype,
             "trust_remote_code": False,
         }
+        return defaults
 
     def setup_model(self, *, model_worker, checkpoint_dir, device, gpu_id, server_args):
         del model_worker, checkpoint_dir, device, gpu_id, server_args
@@ -115,13 +121,32 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
     def __init__(self, *, max_running_requests: int = 1) -> None:
         super().__init__(max_running_requests=max_running_requests)
         self.model_arch_override = VOICECHAT_MODEL_ARCH_OVERRIDE
+        self._source: Path | None = None
 
     def resolve_checkpoint(self, model_path):
         source = Path(resolve_model_path(model_path))
+        self._source = source
         shim = _shim_dir("voicechat", source)
         config = NemotronVoiceChatConfig.from_dict(json.loads((source / "config.json").read_text()))
         (shim / "config.json").write_text(config.to_json_string())
         return str(shim)
+
+    def _prompt_token_ids(self) -> list[int]:
+        """The spoken-style system prompt the conversation opens with.
+
+        The model was trained with one; opening on a bare BOS leaves it
+        without the instruction it expects.
+        """
+        speech = json.loads((self._source / "config.json").read_text())["model"]
+        name = speech["speech_generation"]["model"]["tts_config"]["cas_config"][
+            "pretrained_tokenizer_name"
+        ]
+        tokenizer = AutoTokenizer.from_pretrained(name)
+        return [
+            TEXT_BOS_ID,
+            *tokenizer.encode(SYSTEM_PROMPT, add_special_tokens=False),
+            TEXT_EOS_ID,
+        ]
 
     def pre_infra_setup(self, checkpoint_dir):
         del checkpoint_dir
@@ -136,8 +161,12 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
     def make_adapters(self, model):
         vocab_size = int(model.llm.config.vocab_size)
 
+        prompt_token_ids = self._prompt_token_ids()
+
         def build(payload):
-            return build_thinker_request(payload, vocab_size=vocab_size)
+            return build_thinker_request(
+                payload, vocab_size=vocab_size, prompt_token_ids=prompt_token_ids,
+            )
 
         return build, apply_thinker_result
 
@@ -150,7 +179,8 @@ class NemotronVoiceChatTalkerEngineBuilder(_VoiceChatEngineBuilder):
     context_length = 4096
     scheduler_class = NemotronTalkerScheduler
 
-    def __init__(self, *, max_running_requests: int = 1, context_length: int | None = None) -> None:
+    def __init__(self, *, max_running_requests: int = 1,
+                 context_length: int | None = None) -> None:
         super().__init__(max_running_requests=max_running_requests)
         self.model_arch_override = TALKER_ARCH
         if context_length is not None:

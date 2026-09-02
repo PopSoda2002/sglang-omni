@@ -5,6 +5,10 @@ from typing import Any
 
 from sglang_omni.scheduling.pipeline_state import DeclarativeStateBase, wire
 
+INPUT_SAMPLE_RATE = 16_000
+OUTPUT_SAMPLE_RATE = 22_050
+
+
 @dataclass
 class NemotronVoiceChatState(DeclarativeStateBase):
     # 16 kHZ mono audio

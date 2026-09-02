@@ -1,7 +1,12 @@
 from pydantic import Field
 from typing import ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import (
+    PipelineConfig,
+    StageConfig,
+    StageResourceConfig,
+    StageRuntimeConfig,
+)
 
 # The ckpt is all saved in float32.
 MODEL_DTYPE = "float32"
@@ -19,18 +24,26 @@ def nemotron_voicechat_stages_factory() -> list[StageConfig]:
         ),
         StageConfig(
             name="perception",
-            process="pipeline",
+            process="perception",
             factory=f"{MODEL_STAGES_PREFIX}.create_perception_executor",
             factory_args={"dtype": MODEL_DTYPE},
             gpu=0,
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.12)
+            ),
             next="thinker",
         ),
         StageConfig(
             name="thinker",
-            process="pipeline",
+            process="thinker",
             factory=f"{MODEL_STAGES_PREFIX}.create_thinker_executor",
-            factory_args={"dtype": MODEL_DTYPE},
+            # NemotronH runs under SGLang, whose rmsnorm kernel has no float32
+            # path; the rest of the chain keeps the checkpoint's precision.
+            factory_args={"dtype": "bfloat16"},
             gpu=0,
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.52)
+            ),
             next="decode",
             stream_to=["talker"],
         ),
@@ -42,10 +55,13 @@ def nemotron_voicechat_stages_factory() -> list[StageConfig]:
         ),
         StageConfig(
             name="talker",
-            process="pipeline",
+            process="talker",
             factory=f"{MODEL_STAGES_PREFIX}.create_talker_executor",
             factory_args={"dtype": "bfloat16"},
-            gpu=1,
+            gpu=0,
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.22)
+            ),
             wait_for=["perception"],
             merge_fn="sglang_omni.models.nemotron_voicechat.request_builders.merge_for_talker",
             can_accept_stream_before_payload=True,
@@ -54,10 +70,13 @@ def nemotron_voicechat_stages_factory() -> list[StageConfig]:
         ),
         StageConfig(
             name="code2wav",
-            process="pipeline",
+            process="code2wav",
             factory=f"{MODEL_STAGES_PREFIX}.create_code2wav_executor",
             factory_args={"dtype": MODEL_DTYPE},
-            gpu=1,
+            gpu=0,
+            runtime=StageRuntimeConfig(
+                resources=StageResourceConfig(total_gpu_memory_fraction=0.08)
+            ),
             terminal=True,
             can_accept_stream_before_payload=True,
         ),

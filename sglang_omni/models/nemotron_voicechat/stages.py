@@ -102,8 +102,11 @@ def _speech_generation_config(model_path: str) -> dict:
     return config["model"]["speech_generation"]["model"]
 
 
-def create_talker_executor(model_path, *, dtype=None, device=None, gpu_id=None, context_length=None, **overrides):
-    builder = NemotronVoiceChatTalkerEngineBuilder(max_running_requests=1, context_length=context_length)
+def create_talker_executor(model_path, *, dtype=None, device=None, gpu_id=None,
+                           context_length=None, **overrides):
+    builder = NemotronVoiceChatTalkerEngineBuilder(
+        max_running_requests=1, context_length=context_length,
+    )
     return builder.build(
         model_path,
         device=device,

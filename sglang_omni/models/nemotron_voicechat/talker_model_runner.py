@@ -70,13 +70,29 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             self._warmup_rows = talker.gated_fusion_audio_text(audio, text)
         return self._warmup_rows
 
+    def _pad_codes(self) -> torch.Tensor:
+        return torch.full(
+            (1, self.model.talker.num_quantizers),
+            self.speech_pad_id, dtype=torch.long, device=self._device(),
+        )
+
+    def _step_row(self, prev_codes: torch.Tensor, token: int) -> torch.Tensor:
+        """The one row a frame forwards: last frame's codes, this frame's text."""
+        talker = self.model.talker
+        if self.force_silence and token == self.text_eos_id:
+            prev_codes = self.model.codec_silence_tokens.unsqueeze(0)
+        audio_1D = talker.embed_codes(prev_codes)
+        ids, chars, lengths = self._char_batch([token])
+        text_1D = talker.embed_subword(ids, chars, lengths)
+        return talker.gated_fusion_audio_text(audio_1D, text_1D)
+
     def before_prefill(self, forward_batch, schedule_batch, requests) -> None:
         del schedule_batch
-        rows = self._warmup()
+        rows = [self._warmup() for _ in requests]
         attach_omni_prefill_inputs(
             forward_batch,
             OmniPrefillInputs(
-                input_embeds=torch.cat([rows] * len(requests), dim=0),
+                input_embeds=torch.cat(rows, dim=0),
                 input_embeds_are_projected=True,
             ),
         )
@@ -85,11 +101,8 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         del result, forward_batch, schedule_batch
         for request in requests:
             inputs = request.data.talker_model_inputs
-            inputs["prev_codes"] = torch.full(
-                (1, self.model.talker.num_quantizers),
-                self.speech_pad_id, dtype=torch.long, device=self._device(),
-            )
             inputs["codes_rows"] = []
+            inputs["prev_codes"] = self._pad_codes()
 
     def is_decode_batch_ready(self, schedule_batch) -> bool:
         return all(len(req._omni_data.pending_text_queue) > 0 for req in schedule_batch.reqs)
@@ -97,33 +110,30 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def before_decode(self, forward_batch, schedule_batch, requests, *, is_lookahead=False) -> None:
         del forward_batch, schedule_batch, is_lookahead
         model = self.model
-        talker = model.talker
         rows = []
         for request in requests:
             data = request.data
-            inputs = data.talker_model_inputs
-            token = data.pending_text_queue.popleft()
-            if self.force_silence and token == self.text_eos_id:
-                inputs["prev_codes"] = model.codec_silence_tokens.unsqueeze(0)
-            audio_1D = talker.embed_codes(inputs["prev_codes"])
-            ids, chars, lengths = self._char_batch([token])
-            text_1D = talker.embed_subword(ids, chars, lengths)
-            rows.append(talker.gated_fusion_audio_text(audio_1D, text_1D))
+            rows.append(self._step_row(
+                data.talker_model_inputs["prev_codes"],
+                data.pending_text_queue.popleft(),
+            ))
         batch = len(rows)
         model._fusion_buffer[:batch] = torch.cat(rows, dim=0)
         model._fusion_mask[:batch] = True
 
+    def _generate_codes(self, index: int) -> torch.Tensor:
+        model = self.model
+        return model.talker.generate_codes(
+            model._hidden_out[index:index + 1], model.mog_head,
+            num_iter=NUM_ITER, exponent=self.exponent,
+            top_p=self.top_p, noise_scale=self.noise_scale,
+        )
+
     def post_decode(self, result, forward_batch, schedule_batch, requests) -> None:
         del result, forward_batch, schedule_batch
-        model = self.model
         for index, request in enumerate(requests):
             inputs = request.data.talker_model_inputs
-            hidden = model._hidden_out[index:index + 1]
-            codes = model.talker.generate_codes(
-                hidden, model.mog_head,
-                num_iter=NUM_ITER, exponent=self.exponent,
-                top_p=self.top_p, noise_scale=self.noise_scale,
-            )
+            codes = self._generate_codes(index)
             inputs["prev_codes"] = codes
             inputs["codes_rows"].append(codes[0])
             inputs["stream_chunk"] = codes.cpu()
