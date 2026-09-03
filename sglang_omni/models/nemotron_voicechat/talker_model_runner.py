@@ -22,10 +22,15 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def __init__(self, tp_worker, output_processor):
         super().__init__(tp_worker, output_processor)
         speech = self.model.config.nemotron_speech
-        self.tokenizer = AutoTokenizer.from_pretrained(speech["tokenizer_name"])
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            speech["tokenizer_name"],
+            bos_token=speech.get("bos_token"),
+            eos_token=speech.get("eos_token"),
+            pad_token=speech.get("pad_token"),
+        )
         self.char_vocab = char_vocab_from_tokenizer(self.tokenizer)
         self.char_padding_idx = len(self.char_vocab)
-        self.text_pad_id = self.tokenizer.get_vocab()["<unk>"]
+        self.text_pad_id = int(self.tokenizer.pad_token_id)
         self.text_eos_id = int(self.tokenizer.eos_token_id)
         self.exponent = float(speech["tts_config"]["exponent"])
         self.top_p = float(speech["inference_top_p_or_k"])
