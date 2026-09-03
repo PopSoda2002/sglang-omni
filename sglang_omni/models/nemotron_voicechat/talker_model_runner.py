@@ -67,13 +67,12 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             model = self.model
             talker = model.talker
             frames = model.audio_prompt_latent.shape[0]
-            # The prompt's last frame is the one the model starts speaking
-            # from: no audio behind it, so its codes are the padding one,
-            # whose latent is zero and whose embedding is therefore just the
-            # BOS vector.
+            # The prompt's last frame is where the model starts speaking. The
+            # reference consumes the prompt's codes shifted by one, so what
+            # this frame carries is the silence behind it, not its own entry.
             audio = torch.cat([
                 model.audio_prompt_latent[:-1],
-                talker.embed_codes(self._pad_codes()) + talker.bos_emb,
+                talker.embed_codes(model.codec_silence_tokens.unsqueeze(0)) + talker.bos_emb,
             ])
             ids, chars, lengths = self._char_batch(
                 [self.text_pad_id] * (frames - 1) + [self.text_eos_id]

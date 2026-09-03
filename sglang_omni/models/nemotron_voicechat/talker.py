@@ -86,9 +86,16 @@ class TalkerEmbedding(nn.Module):
 
 
 def build_char_encoder(config: dict) -> nn.Module:
-    encoder_config = T5GemmaModuleConfig(**config["encoder"], vocab_size=1)
+    # Two config objects, not one shared: T5GemmaConfig marks whichever it is
+    # handed as the decoder causal, in place. Sharing one instance makes the
+    # encoder causal too, and a character encoder that cannot look ahead
+    # reads every subword as a prefix -- the speech stays fluent but the
+    # words come out wrong.
+    module_config = lambda: T5GemmaModuleConfig(**config["encoder"], vocab_size=1)
     model = T5GemmaEncoderModel(
-        T5GemmaConfig(encoder=encoder_config, decoder=encoder_config, is_encoder_decoder=False)
+        T5GemmaConfig(
+            encoder=module_config(), decoder=module_config(), is_encoder_decoder=False
+        )
     )
     model.set_input_embeddings(nn.Identity())
     return model
