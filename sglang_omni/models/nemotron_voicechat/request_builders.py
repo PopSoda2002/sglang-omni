@@ -13,8 +13,8 @@ from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestDa
 BOS_TOKEN_ID = 1
 TEXT_BOS_ID = 1
 TALKER_PLACEHOLDER_ID = 0
-TEXT_PAD_ID = 0
-TEXT_EOS_ID = 12
+TEXT_PAD_ID = 12
+TEXT_EOS_ID = 2
 SYSTEM_PROMPT = "You are a helpful realtime voice assistant."
 
 
@@ -91,7 +91,7 @@ def build_talker_request(payload: StagePayload, *, vocab_size: int, prompt_frame
     return _ar_request(
         payload,
         input_ids=[TALKER_PLACEHOLDER_ID] * prompt_frames,
-        max_new_tokens=num_frames + 1,
+        max_new_tokens=num_frames,
         vocab_size=vocab_size,
     )
 
