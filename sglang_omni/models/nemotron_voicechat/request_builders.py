@@ -97,7 +97,7 @@ def build_talker_request(payload: StagePayload, *, vocab_size: int, prompt_frame
     return _ar_request(
         payload,
         input_ids=[TALKER_PLACEHOLDER_ID] * prompt_frames,
-        max_new_tokens=num_frames + 1,
+        max_new_tokens=num_frames,
         vocab_size=vocab_size,
     )
 

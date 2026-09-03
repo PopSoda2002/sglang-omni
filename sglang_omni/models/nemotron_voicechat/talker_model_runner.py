@@ -22,16 +22,22 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def __init__(self, tp_worker, output_processor):
         super().__init__(tp_worker, output_processor)
         speech = self.model.config.nemotron_speech
-        self.tokenizer = AutoTokenizer.from_pretrained(speech["tokenizer_name"])
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            speech["tokenizer_name"],
+            bos_token=speech.get("bos_token"),
+            eos_token=speech.get("eos_token"),
+            pad_token=speech.get("pad_token"),
+        )
         self.char_vocab = char_vocab_from_tokenizer(self.tokenizer)
         self.char_padding_idx = len(self.char_vocab)
-        # Names, not the tokenizer's own specials: this checkpoint's HF
-        # eos_token_id is <SPECIAL_12>, which is the text channel's PAD. Pad
-        # marks the frames where the model is still speaking but has already
-        # emitted the whole sentence; </s> is what actually ends the turn.
-        ident = self.tokenizer.convert_tokens_to_ids
-        self.text_pad_id = ident(speech.get("pad_token", "<SPECIAL_12>"))
-        self.text_eos_id = ident(speech.get("eos_token", "</s>"))
+        # These come from the checkpoint's names above, not from the
+        # tokenizer's own defaults: untouched, its eos_token_id is
+        # <SPECIAL_12>, which is the text channel's PAD. Pad marks the frames
+        # where the model is still speaking but has already emitted the whole
+        # sentence, so forcing silence on it truncates every utterance; </s>
+        # is what actually ends the turn.
+        self.text_pad_id = int(self.tokenizer.pad_token_id)
+        self.text_eos_id = int(self.tokenizer.eos_token_id)
         self.exponent = float(speech["tts_config"]["exponent"])
         self.top_p = float(speech["inference_top_p_or_k"])
         self.noise_scale = float(speech["inference_noise_scale"])
@@ -110,11 +116,22 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         del result, forward_batch, schedule_batch
         for request in requests:
             inputs = request.data.talker_model_inputs
-            inputs["codes_rows"] = []
+            first_code = torch.zeros(
+                self.model.talker.num_quantizers,
+                dtype=torch.long,
+                device=self._device(),
+            )
+            inputs["codes_rows"] = [first_code]
             inputs["prev_codes"] = self._pad_codes()
+            inputs["first_step"] = True
+            inputs["stream_chunk"] = first_code.unsqueeze(0).cpu()
 
     def is_decode_batch_ready(self, schedule_batch) -> bool:
-        return all(len(req._omni_data.pending_text_queue) > 0 for req in schedule_batch.reqs)
+        return all(
+            len(req._omni_data.pending_text_queue)
+            >= (2 if req._omni_data.talker_model_inputs.get("first_step") else 1)
+            for req in schedule_batch.reqs
+        )
 
     def before_decode(self, forward_batch, schedule_batch, requests, *, is_lookahead=False) -> None:
         del forward_batch, schedule_batch, is_lookahead
@@ -122,9 +139,13 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         rows = []
         for request in requests:
             data = request.data
+            if data.talker_model_inputs.get("first_step"):
+                data.pending_text_queue.popleft()
+                data.talker_model_inputs["first_step"] = False
+            token = data.pending_text_queue.popleft()
             rows.append(self._step_row(
                 data.talker_model_inputs["prev_codes"],
-                data.pending_text_queue.popleft(),
+                token,
             ))
         batch = len(rows)
         model._fusion_buffer[:batch] = torch.cat(rows, dim=0)
