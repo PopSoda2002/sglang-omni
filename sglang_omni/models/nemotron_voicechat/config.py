@@ -60,6 +60,9 @@ def nemotron_voicechat_stages_factory() -> list[StageConfig]:
             name="talker",
             process="talker",
             factory=f"{MODEL_STAGES_PREFIX}.create_talker_executor",
+            # NVIDIA runs this stage in float32 (its MoG and codec-embedding
+            # path mixes fp32 buffers), but under SGLang the Gemma3 backbone
+            # goes through FlashAttention, which takes fp16/bf16/fp8 only.
             factory_args={"dtype": "bfloat16"},
             gpu=0,
             runtime=StageRuntimeConfig(

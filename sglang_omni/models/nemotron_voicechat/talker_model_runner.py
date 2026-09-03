@@ -25,8 +25,13 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         self.tokenizer = AutoTokenizer.from_pretrained(speech["tokenizer_name"])
         self.char_vocab = char_vocab_from_tokenizer(self.tokenizer)
         self.char_padding_idx = len(self.char_vocab)
-        self.text_pad_id = self.tokenizer.get_vocab()["<unk>"]
-        self.text_eos_id = int(self.tokenizer.eos_token_id)
+        # Names, not the tokenizer's own specials: this checkpoint's HF
+        # eos_token_id is <SPECIAL_12>, which is the text channel's PAD. Pad
+        # marks the frames where the model is still speaking but has already
+        # emitted the whole sentence; </s> is what actually ends the turn.
+        ident = self.tokenizer.convert_tokens_to_ids
+        self.text_pad_id = ident(speech.get("pad_token", "<SPECIAL_12>"))
+        self.text_eos_id = ident(speech.get("eos_token", "</s>"))
         self.exponent = float(speech["tts_config"]["exponent"])
         self.top_p = float(speech["inference_top_p_or_k"])
         self.noise_scale = float(speech["inference_noise_scale"])
@@ -56,10 +61,13 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             model = self.model
             talker = model.talker
             frames = model.audio_prompt_latent.shape[0]
-            silence_1Q = model.codec_silence_tokens.unsqueeze(0)
+            # The prompt's last frame is the one the model starts speaking
+            # from: no audio behind it, so its codes are the padding one,
+            # whose latent is zero and whose embedding is therefore just the
+            # BOS vector.
             audio = torch.cat([
                 model.audio_prompt_latent[:-1],
-                talker.embed_codes(silence_1Q) + talker.bos_emb,
+                talker.embed_codes(self._pad_codes()) + talker.bos_emb,
             ])
             ids, chars, lengths = self._char_batch(
                 [self.text_pad_id] * (frames - 1) + [self.text_eos_id]
@@ -92,7 +100,8 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         attach_omni_prefill_inputs(
             forward_batch,
             OmniPrefillInputs(
-                input_embeds=torch.cat(rows, dim=0),
+                # Back to the backbone's dtype: the rows were built in float32.
+                input_embeds=torch.cat(rows, dim=0).to(self.model._fusion_buffer.dtype),
                 input_embeds_are_projected=True,
             ),
         )
@@ -124,7 +133,7 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def _generate_codes(self, index: int) -> torch.Tensor:
         model = self.model
         return model.talker.generate_codes(
-            model._hidden_out[index:index + 1], model.mog_head,
+            model._hidden_out[index:index + 1].float(), model.mog_head,
             num_iter=NUM_ITER, exponent=self.exponent,
             top_p=self.top_p, noise_scale=self.noise_scale,
         )

@@ -15,8 +15,6 @@ from transformers import AutoTokenizer
 
 from sglang_omni.models.nemotron_voicechat.request_builders import (
     SYSTEM_PROMPT,
-    TEXT_BOS_ID,
-    TEXT_EOS_ID,
     apply_talker_result,
     apply_thinker_result,
     build_talker_request,
@@ -131,22 +129,24 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
         (shim / "config.json").write_text(config.to_json_string())
         return str(shim)
 
-    def _prompt_token_ids(self) -> list[int]:
-        """The spoken-style system prompt the conversation opens with.
+    def _prompt_tokens(self) -> tuple[list[int], int]:
+        """The instruction a conversation opens with, and the padding id.
 
-        The model was trained with one; opening on a bare BOS leaves it
-        without the instruction it expects.
+        Which token means begin, end and pad is the checkpoint's to say — the
+        three are easy to confuse here, since this tokenizer's padding token is
+        the frame-locked silence marker rather than anything called "pad".
         """
-        speech = json.loads((self._source / "config.json").read_text())["model"]
-        name = speech["speech_generation"]["model"]["tts_config"]["cas_config"][
-            "pretrained_tokenizer_name"
-        ]
-        tokenizer = AutoTokenizer.from_pretrained(name)
-        return [
-            TEXT_BOS_ID,
+        stt = json.loads((self._source / "config.json").read_text())["model"]["stt"]["model"]
+        tokenizer = AutoTokenizer.from_pretrained(
+            stt.get("pretrained_llm", "nvidia/NVIDIA-Nemotron-Nano-9B-v2")
+        )
+        ident = tokenizer.convert_tokens_to_ids
+        prompt = [
+            ident(stt.get("bos_token", "<s>")),
             *tokenizer.encode(SYSTEM_PROMPT, add_special_tokens=False),
-            TEXT_EOS_ID,
+            ident(stt.get("eos_token", "</s>")),
         ]
+        return prompt, ident(stt.get("pad_token", "<SPECIAL_12>"))
 
     def pre_infra_setup(self, checkpoint_dir):
         del checkpoint_dir
@@ -161,11 +161,13 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
     def make_adapters(self, model):
         vocab_size = int(model.llm.config.vocab_size)
 
-        prompt_token_ids = self._prompt_token_ids()
+        prompt_token_ids, pad_token_id = self._prompt_tokens()
+        self._model_runner_pad_id = pad_token_id
 
         def build(payload):
             return build_thinker_request(
                 payload, vocab_size=vocab_size, prompt_token_ids=prompt_token_ids,
+                pad_token_id=pad_token_id,
             )
 
         return build, apply_thinker_result

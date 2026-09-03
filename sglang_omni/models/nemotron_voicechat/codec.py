@@ -124,7 +124,24 @@ class RVQVAEDecoder(nn.Module):
         self.prvq = ResidualVectorQuantizer(config)
         self.decoder = Latent2Wav(config)
         self.samples_per_frame = int(config["wav_to_token_ratio"])
+        # The talker marks the edges of an utterance with codes that sit above
+        # the codebook — begin, end, pad. They index nothing, so they stand in
+        # for silence here; without this the frames that open each phrase
+        # decode to noise and the phrase loses its first words.
+        self.register_buffer(
+            "control_codes", torch.empty(3, dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "silence_codes",
+            torch.empty(int(config["num_quantizers"]), dtype=torch.long),
+            persistent=False,
+        )
 
     def forward(self, codes_TQ):
+        codes_TQ = torch.where(
+            torch.isin(codes_TQ, self.control_codes),
+            self.silence_codes.to(codes_TQ.device).expand_as(codes_TQ),
+            codes_TQ,
+        )
         wave_BS = self.decoder(self.prvq(codes_TQ))
         return rearrange(wave_BS, "1 s -> s")

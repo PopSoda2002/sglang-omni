@@ -20,9 +20,10 @@ from sglang_omni.models.nemotron_voicechat.payload_types import (
     NemotronVoiceChatState,
 )
 from sglang_omni.models.weight_loader import load_module, load_weights_by_prefix, resolve_dtype, resolve_model_path
-from sglang_omni.preprocessing.transcription import prepare_audio
+from sglang_omni.preprocessing.transcription import resolve_audio_source
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.utils.audio import load_audio
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.utils.device import resolve_device_spec
 
@@ -41,12 +42,18 @@ def create_preprocessing_executor(model_path: str, **_):
     del model_path
 
     def preprocess(payload: StagePayload) -> StagePayload:
-        prepared = prepare_audio(
-            payload,
+        # The first channel, not a mono downmix. This model listens to one side
+        # of a conversation and speaks the other, so a two-party stereo
+        # recording -- which is what the checkpoint's own sample files are --
+        # carries the agent on the second channel. Averaging them in would feed
+        # the model the answers it is meant to produce.
+        channels = load_audio(
+            resolve_audio_source(payload),
             source_name="VoiceChat",
             target_sample_rate=INPUT_SAMPLE_RATE,
+            mono=False,
         )
-        waveform = torch.as_tensor(prepared.waveform, dtype=torch.float32)
+        waveform = torch.as_tensor(channels[0], dtype=torch.float32)
         remainder = waveform.shape[-1] % SAMPLES_PER_FRAME
         if remainder:
             waveform = nn.functional.pad(waveform, (0, SAMPLES_PER_FRAME - remainder))
@@ -125,6 +132,9 @@ def create_code2wav_executor(model_path, *, dtype=None, device=None):
     device = resolve_device_spec(device)
     generation = _speech_generation_config(model_path)
     weights = load_weights_by_prefix(model_path, prefix=("tts_model.audio_codec.",))
+    # The codes that mark an utterance's edges live beside the codec rather
+    # than inside it, so they are read under their own prefix.
+    markers = load_weights_by_prefix(model_path, prefix=("tts_model.",))
     decoder_weights = {
         key: value
         for key, value in weights.items()
@@ -132,6 +142,10 @@ def create_code2wav_executor(model_path, *, dtype=None, device=None):
     }
     decoder = RVQVAEDecoder(generation["codec_config"])
     decoder.load_state_dict(decoder_weights, strict=True)
+    # What counts as a control code, and the silence that stands in for it,
+    # are the checkpoint's to say.
+    decoder.control_codes.copy_(markers["_control_codes"].reshape(-1))
+    decoder.silence_codes.copy_(markers["codec_silence_tokens"].reshape(-1))
     decoder = decoder.to(device=device, dtype=resolve_dtype(dtype)).eval()
 
     @torch.inference_mode()

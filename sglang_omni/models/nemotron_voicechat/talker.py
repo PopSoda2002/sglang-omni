@@ -254,3 +254,12 @@ class NemotronVoiceChatTalker(nn.Module):
         self.llm.load_weights(backbone_weights)
         self.talker.load_state_dict(talker_state, strict=True)
         self.mog_head.load_state_dict(mog_state, strict=True)
+        # Everything outside the backbone runs in float32. The head samples a
+        # mixture of Gaussians and the result is then quantised to its nearest
+        # entry in each of the 31 residual codebooks; at bfloat16 that search
+        # picks a neighbouring code often enough to slur the speech. The
+        # backbone stays bfloat16 because the attention kernels take nothing
+        # else.
+        self.talker.float()
+        self.mog_head.float()
+        self.audio_prompt_latent = self.audio_prompt_latent.float()

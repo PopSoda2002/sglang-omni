@@ -8,7 +8,6 @@ from sglang_omni.model_runner.prefill_inputs import (
     attach_omni_prefill_inputs,
 )
 from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
-from sglang_omni.models.nemotron_voicechat.request_builders import TEXT_PAD_ID
 
 class NemotronVoiceChatModelRunner(ModelRunner):
     def before_prefill(self, forward_batch, schedule_batch, requests) -> None:
@@ -60,7 +59,9 @@ class NemotronVoiceChatModelRunner(ModelRunner):
             [spoken, row.to(device=spoken.device, dtype=spoken.dtype).reshape(1, -1)],
             dim=0,
         )
-        pad = embeddings(torch.full_like(ids, TEXT_PAD_ID))
+        # The last id the request carries is the padding one, and every
+        # position's text and function channels are that same padding.
+        pad = embeddings(torch.full_like(ids, int(ids[-1])))
         fusion = self.model.fusion
         return (
             pad * fusion.text_weight

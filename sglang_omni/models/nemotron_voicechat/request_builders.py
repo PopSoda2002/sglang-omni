@@ -11,11 +11,16 @@ from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 
 BOS_TOKEN_ID = 1
-TEXT_BOS_ID = 1
 TALKER_PLACEHOLDER_ID = 0
-TEXT_PAD_ID = 0
-TEXT_EOS_ID = 12
-SYSTEM_PROMPT = "You are a helpful realtime voice assistant."
+# What the checkpoint's stt config names, resolved through its tokenizer, is
+# authoritative for these; see NemotronVoiceChatEngineBuilder._prompt_tokens.
+SYSTEM_PROMPT = (
+    "You are an AI voice assistant developed by NVIDIA. "
+    "Your name is NVIDIA Voice Chat. "
+    "Answer in a spoken, conversational style rather than a written one. "
+    "Do not repeat the same sentence over and over again. "
+    "Start the conversation by greeting the user."
+)
 
 
 def _ar_request(payload: StagePayload, *, input_ids: list[int], max_new_tokens: int,
@@ -43,7 +48,8 @@ def _ar_request(payload: StagePayload, *, input_ids: list[int], max_new_tokens: 
 
 
 def build_thinker_request(payload: StagePayload, *, vocab_size: int,
-                         prompt_token_ids: list[int]) -> SGLangARRequestData:
+                         prompt_token_ids: list[int],
+                         pad_token_id: int) -> SGLangARRequestData:
     """Whole-utterance request used by the offline pipeline.
 
     It opens on the spoken-style system prompt the model was trained with,
@@ -51,7 +57,7 @@ def build_thinker_request(payload: StagePayload, *, vocab_size: int,
     a decode step.
     """
     num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
-    opening = [*prompt_token_ids, TEXT_PAD_ID]
+    opening = [*prompt_token_ids, pad_token_id]
     data = _ar_request(
         payload, input_ids=opening, max_new_tokens=num_frames, vocab_size=vocab_size,
     )
