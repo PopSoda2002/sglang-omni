@@ -42,11 +42,8 @@ def create_preprocessing_executor(model_path: str, **_):
     del model_path
 
     def preprocess(payload: StagePayload) -> StagePayload:
-        # The first channel, not a mono downmix. This model listens to one side
-        # of a conversation and speaks the other, so a two-party stereo
-        # recording -- which is what the checkpoint's own sample files are --
-        # carries the agent on the second channel. Averaging them in would feed
-        # the model the answers it is meant to produce.
+        # Channel 0, not a downmix: this model speaks the other side of the
+        # conversation, so a two-party recording carries the agent on channel 1.
         channels = load_audio(
             resolve_audio_source(payload),
             source_name="VoiceChat",
@@ -150,12 +147,7 @@ def create_code2wav_executor(model_path, *, dtype=None, device=None):
 
     @torch.inference_mode()
     def decode(payload: StagePayload) -> StagePayload:
-        """Decode a whole code stack at once.
-
-        The talker normally streams its codes, and the scheduler renders those
-        incrementally; this is the path for a reply that arrives with no
-        chunks at all, and it answers in the same shape.
-        """
+        """Render a whole code stack at once, for a reply that never streamed."""
         state = NemotronVoiceChatState.from_dict(payload.data)
         waveform = decoder(state.codes.to(device)).float().cpu()
         payload.data = audio_waveform_payload(

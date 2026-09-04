@@ -44,11 +44,8 @@ class MLPLayer(nn.Module):
 class MoGHead(nn.Module):
     """Mixture of Gaussians over the codec's continuous latent.
 
-    The mixture has 1024 components over a 512-dimensional latent, which would
-    be 512K parameters of means. They are factorised instead: ``proj_mus``
-    emits a rank-64 coefficient vector per component and ``low_mat`` carries
-    the per-component 512x64 basis, so the mean is reconstructed for the one
-    component that was sampled rather than materialised for all of them.
+    The 1024 means are factorised rank-64 so only the sampled component's
+    mean is reconstructed, not all of them.
     """
 
     def __init__(self, config: dict) -> None:
@@ -71,17 +68,8 @@ class MoGHead(nn.Module):
         self.low_mat = nn.Parameter(torch.empty(self.num_predictions, self.out_size, self.low_rank))
 
     def infer(self, hidden_TD, *, guidance_scale: float = 0.0, top_p: float | None = None):
-        """Sample one latent per position.
-
-        Args:
-            hidden_TD: talker hidden states. With guidance the conditioned and
-                unconditioned halves are stacked along the batch axis.
-            guidance_scale: classifier-free guidance strength; 0 disables it.
-            top_p: nucleus threshold on the mixture weights.
-
-        Returns:
-            ``(latent, log_std)`` for the sampled component.
-        """
+        """Sample one latent per position. Under guidance the conditioned and
+        unconditioned halves arrive stacked along the batch axis."""
         hidden_TD = self.mlp_stack(hidden_TD)
         if guidance_scale > 0:
             conditioned, unconditioned = hidden_TD.chunk(2, dim=0)

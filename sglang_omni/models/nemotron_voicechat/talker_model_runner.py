@@ -30,12 +30,8 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         )
         self.char_vocab = char_vocab_from_tokenizer(self.tokenizer)
         self.char_padding_idx = len(self.char_vocab)
-        # These come from the checkpoint's names above, not from the
-        # tokenizer's own defaults: untouched, its eos_token_id is
-        # <SPECIAL_12>, which is the text channel's PAD. Pad marks the frames
-        # where the model is still speaking but has already emitted the whole
-        # sentence, so forcing silence on it truncates every utterance; </s>
-        # is what actually ends the turn.
+        # From the checkpoint's names above: the tokenizer's own eos_token_id
+        # is <SPECIAL_12>, the text channel's PAD, which means still speaking.
         self.text_pad_id = int(self.tokenizer.pad_token_id)
         self.text_eos_id = int(self.tokenizer.eos_token_id)
         self.exponent = float(speech["tts_config"]["exponent"])
@@ -67,9 +63,8 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             model = self.model
             talker = model.talker
             frames = model.audio_prompt_latent.shape[0]
-            # The prompt's last frame is where the model starts speaking. The
-            # reference consumes the prompt's codes shifted by one, so what
-            # this frame carries is the silence behind it, not its own entry.
+            # The prompt's codes are consumed shifted by one, so the frame the
+            # model starts speaking from carries the silence behind it.
             audio = torch.cat([
                 model.audio_prompt_latent[:-1],
                 talker.embed_codes(model.codec_silence_tokens.unsqueeze(0)) + talker.bos_emb,

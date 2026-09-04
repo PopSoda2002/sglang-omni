@@ -40,7 +40,7 @@ TALKER_PLACEHOLDER_VOCAB = 8
 def _shim_dir(name: str, source: Path) -> Path:
     shim = CACHE_ROOT / name
     shim.mkdir(parents=True, exist_ok=True)
-    for entry in source.iterdir():
+    for entry in source.resolve().iterdir():
         link = shim / entry.name
         if entry.name != "config.json" and not link.exists():
             link.symlink_to(entry)

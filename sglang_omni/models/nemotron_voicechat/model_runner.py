@@ -42,14 +42,8 @@ class NemotronVoiceChatModelRunner(ModelRunner):
         return self._acoustic_frames(data)[index]
 
     def _prefill_rows(self, data) -> torch.Tensor:
-        """What the request's first forward carries.
-
-        The instruction rides the same channel the caller's audio does — it is
-        what the model has heard so far — and the text and function channels
-        are padding, because the model has not said anything yet. The last
-        position is this frame's audio, which is why the request carries one
-        token more than the prompt.
-        """
+        """The instruction rides the caller's audio channel, text and function
+        are padding, and the last position is the first acoustic frame."""
         embeddings = self.model.llm.get_input_embeddings()
         device = embeddings.weight.device
         ids = data.input_ids.to(device)

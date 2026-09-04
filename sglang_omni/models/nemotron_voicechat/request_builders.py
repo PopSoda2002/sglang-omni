@@ -50,12 +50,8 @@ def _ar_request(payload: StagePayload, *, input_ids: list[int], max_new_tokens: 
 def build_thinker_request(payload: StagePayload, *, vocab_size: int,
                          prompt_token_ids: list[int],
                          pad_token_id: int) -> SGLangARRequestData:
-    """Whole-utterance request used by the offline pipeline.
-
-    It opens on the spoken-style system prompt the model was trained with,
-    plus one position for the first acoustic frame; every frame after that is
-    a decode step.
-    """
+    """One request per utterance: the system prompt plus a position for the
+    first acoustic frame, then one decode step per frame."""
     num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
     opening = [*prompt_token_ids, pad_token_id]
     data = _ar_request(

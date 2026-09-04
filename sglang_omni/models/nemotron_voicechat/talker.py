@@ -86,11 +86,8 @@ class TalkerEmbedding(nn.Module):
 
 
 def build_char_encoder(config: dict) -> nn.Module:
-    # Two config objects, not one shared: T5GemmaConfig marks whichever it is
-    # handed as the decoder causal, in place. Sharing one instance makes the
-    # encoder causal too, and a character encoder that cannot look ahead
-    # reads every subword as a prefix -- the speech stays fluent but the
-    # words come out wrong.
+    # Separate config objects: T5GemmaConfig marks the one it takes as the
+    # decoder causal in place, which would make this encoder causal too.
     module_config = lambda: T5GemmaModuleConfig(**config["encoder"], vocab_size=1)
     model = T5GemmaEncoderModel(
         T5GemmaConfig(
@@ -261,12 +258,8 @@ class NemotronVoiceChatTalker(nn.Module):
         self.llm.load_weights(backbone_weights)
         self.talker.load_state_dict(talker_state, strict=True)
         self.mog_head.load_state_dict(mog_state, strict=True)
-        # Everything outside the backbone runs in float32. The head samples a
-        # mixture of Gaussians and the result is then quantised to its nearest
-        # entry in each of the 31 residual codebooks; at bfloat16 that search
-        # picks a neighbouring code often enough to slur the speech. The
-        # backbone stays bfloat16 because the attention kernels take nothing
-        # else.
+        # float32 outside the backbone: the head's sample is quantised to its
+        # nearest RVQ entry, and bfloat16 rounding picks neighbouring codes.
         self.talker.float()
         self.mog_head.float()
         self.audio_prompt_latent = self.audio_prompt_latent.float()
