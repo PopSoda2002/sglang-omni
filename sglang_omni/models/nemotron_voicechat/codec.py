@@ -11,6 +11,7 @@ MAX_MAGNITUDE = 100.0
 LAYER_NORM_EPS = 1e-6
 EXPANSION = 4
 
+
 class ChannelLayerNorm(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
@@ -19,14 +20,19 @@ class ChannelLayerNorm(nn.Module):
 
     def forward(self, hidden_BCT):
         centred_BCT = hidden_BCT - hidden_BCT.mean(1, keepdim=True)
-        scale_B1T = torch.rsqrt(centred_BCT.pow(2).mean(1, keepdim=True) + LAYER_NORM_EPS)
+        scale_B1T = torch.rsqrt(
+            centred_BCT.pow(2).mean(1, keepdim=True) + LAYER_NORM_EPS
+        )
         return centred_BCT * scale_B1T * self.weight[:, None] + self.bias[:, None]
+
 
 class ConvNeXtBlock(nn.Module):
     def __init__(self, channels: int, kernel_size: int) -> None:
         super().__init__()
         self.left_padding = kernel_size - 1
-        self.dwconv = nn.Conv1d(channels, channels, kernel_size=kernel_size, groups=channels)
+        self.dwconv = nn.Conv1d(
+            channels, channels, kernel_size=kernel_size, groups=channels
+        )
         self.norm = ChannelLayerNorm(channels)
         self.pwconv1 = nn.Conv1d(channels, channels * EXPANSION, kernel_size=1)
         self.act = nn.GELU()
@@ -42,6 +48,7 @@ class ConvNeXtBlock(nn.Module):
         hidden_BCT = self.pwconv2(hidden_BCT)
         return residual_BCT + hidden_BCT
 
+
 class ResidualVectorQuantizer(nn.Module):
     def __init__(self, config: dict) -> None:
         super().__init__()
@@ -49,12 +56,14 @@ class ResidualVectorQuantizer(nn.Module):
         codebook_size = int(config["codebook_size"])
         latent_size = int(config["latent_size"])
         self.mus_list = nn.ParameterList(
-            nn.Parameter(torch.empty(codebook_size, latent_size)) for _ in range(num_quantizers)
+            nn.Parameter(torch.empty(codebook_size, latent_size))
+            for _ in range(num_quantizers)
         )
 
     def forward(self, codes_TQ):
         levels = [codebook[codes_TQ[:, q]] for q, codebook in enumerate(self.mus_list)]
         return torch.stack(levels, dim=0).sum(0)
+
 
 class Latent2Wav(nn.Module):
     def __init__(self, config: dict) -> None:
@@ -73,7 +82,12 @@ class Latent2Wav(nn.Module):
             channels = base * mult
             layers.append(
                 nn.ConvTranspose1d(
-                    in_channels, channels, kernel_size=rate, stride=rate, bias=False, groups=groups
+                    in_channels,
+                    channels,
+                    kernel_size=rate,
+                    stride=rate,
+                    bias=False,
+                    groups=groups,
                 )
             )
             layers.extend(ConvNeXtBlock(channels, kernel_size) for _ in range(blocks))
@@ -102,12 +116,17 @@ class Latent2Wav(nn.Module):
         window_length = self.n_fft
         frames = spectrum_BFT.shape[-1]
         window_W = torch.hann_window(window_length, device=spectrum_BFT.device)
-        frames_BWT = torch.fft.irfft(spectrum_BFT, n=self.n_fft, dim=-2, norm="backward")
+        frames_BWT = torch.fft.irfft(
+            spectrum_BFT, n=self.n_fft, dim=-2, norm="backward"
+        )
         frames_BWT = frames_BWT * window_W[:, None]
 
         length = (frames - 1) * self.hop_length + window_length
         fold = functional.fold(
-            frames_BWT, (1, length), kernel_size=(1, window_length), stride=(1, self.hop_length)
+            frames_BWT,
+            (1, length),
+            kernel_size=(1, window_length),
+            stride=(1, self.hop_length),
         )
         envelope = functional.fold(
             window_W.square().expand(frames, -1).transpose(0, 1)[None],
@@ -117,6 +136,7 @@ class Latent2Wav(nn.Module):
         )
         pad = (window_length - self.hop_length) // 2
         return (fold / envelope.clamp_min(1e-11))[..., 0, 0, pad:-pad]
+
 
 class RVQVAEDecoder(nn.Module):
     def __init__(self, config: dict) -> None:

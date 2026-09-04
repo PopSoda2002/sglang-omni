@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.sampling.sampling_params import SamplingParams
 
@@ -23,8 +22,9 @@ SYSTEM_PROMPT = (
 )
 
 
-def _ar_request(payload: StagePayload, *, input_ids: list[int], max_new_tokens: int,
-                vocab_size: int) -> SGLangARRequestData:
+def _ar_request(
+    payload: StagePayload, *, input_ids: list[int], max_new_tokens: int, vocab_size: int
+) -> SGLangARRequestData:
     sampling_params = SamplingParams(
         max_new_tokens=max_new_tokens,
         temperature=0.0,
@@ -47,9 +47,13 @@ def _ar_request(payload: StagePayload, *, input_ids: list[int], max_new_tokens: 
     )
 
 
-def build_thinker_request(payload: StagePayload, *, vocab_size: int,
-                         prompt_token_ids: list[int],
-                         pad_token_id: int) -> SGLangARRequestData:
+def build_thinker_request(
+    payload: StagePayload,
+    *,
+    vocab_size: int,
+    prompt_token_ids: list[int],
+    pad_token_id: int,
+) -> SGLangARRequestData:
     """Whole-utterance request used by the offline pipeline.
 
     It opens on the spoken-style system prompt the model was trained with,
@@ -59,7 +63,10 @@ def build_thinker_request(payload: StagePayload, *, vocab_size: int,
     num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
     opening = [*prompt_token_ids, pad_token_id]
     data = _ar_request(
-        payload, input_ids=opening, max_new_tokens=num_frames, vocab_size=vocab_size,
+        payload,
+        input_ids=opening,
+        max_new_tokens=num_frames,
+        vocab_size=vocab_size,
     )
     data.pending_stream_tokens = []
     return data
@@ -73,7 +80,9 @@ def apply_thinker_result(data: SGLangARRequestData) -> StagePayload:
     return payload
 
 
-def thinker_stream_output_builder(request_id: str, data: SGLangARRequestData, req_output) -> list[OutgoingMessage]:
+def thinker_stream_output_builder(
+    request_id: str, data: SGLangARRequestData, req_output
+) -> list[OutgoingMessage]:
     del req_output
     tokens = data.pending_stream_tokens
     data.pending_stream_tokens = []
@@ -91,7 +100,9 @@ def thinker_stream_output_builder(request_id: str, data: SGLangARRequestData, re
     ]
 
 
-def build_talker_request(payload: StagePayload, *, vocab_size: int, prompt_frames: int) -> SGLangARRequestData:
+def build_talker_request(
+    payload: StagePayload, *, vocab_size: int, prompt_frames: int
+) -> SGLangARRequestData:
     """Whole-utterance request used by the offline pipeline."""
     num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
     return _ar_request(
@@ -110,7 +121,9 @@ def apply_talker_result(data: SGLangARRequestData) -> StagePayload:
     return payload
 
 
-def talker_stream_output_builder(request_id: str, data: SGLangARRequestData, req_output) -> list[OutgoingMessage]:
+def talker_stream_output_builder(
+    request_id: str, data: SGLangARRequestData, req_output
+) -> list[OutgoingMessage]:
     del req_output
     codes = data.talker_model_inputs.pop("stream_chunk", None)
     if codes is None:

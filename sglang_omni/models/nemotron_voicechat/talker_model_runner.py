@@ -14,7 +14,9 @@ NUM_ITER = 8
 
 def char_vocab_from_tokenizer(tokenizer) -> dict[str, int]:
     vocab = tokenizer.get_vocab()
-    chars = sorted((token for token in vocab if len(token) == 1), key=lambda t: vocab[t])
+    chars = sorted(
+        (token for token in vocab if len(token) == 1), key=lambda t: vocab[t]
+    )
     return {char: index for index, char in enumerate(chars)}
 
 
@@ -51,12 +53,21 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def _char_batch(self, token_ids: list[int]):
         device = self._device()
         sequences = [
-            [self.char_vocab[c] for c in (self.tokenizer.convert_ids_to_tokens(t) or "") if c in self.char_vocab]
+            [
+                self.char_vocab[c]
+                for c in (self.tokenizer.convert_ids_to_tokens(t) or "")
+                if c in self.char_vocab
+            ]
             or [self.char_padding_idx]
             for t in token_ids
         ]
         width = max(len(s) for s in sequences)
-        char_ids = torch.full((len(sequences), width), self.char_padding_idx, dtype=torch.long, device=device)
+        char_ids = torch.full(
+            (len(sequences), width),
+            self.char_padding_idx,
+            dtype=torch.long,
+            device=device,
+        )
         for row, sequence in enumerate(sequences):
             char_ids[row, : len(sequence)] = torch.tensor(sequence, device=device)
         lengths = torch.tensor([len(s) for s in sequences], device=device)
@@ -70,15 +81,18 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             # The prompt's last frame is where the model starts speaking. The
             # reference consumes the prompt's codes shifted by one, so what
             # this frame carries is the silence behind it, not its own entry.
-            audio = torch.cat([
-                model.audio_prompt_latent[:-1],
-                talker.embed_codes(model.codec_silence_tokens.unsqueeze(0)) + talker.bos_emb,
-            ])
+            audio = torch.cat(
+                [
+                    model.audio_prompt_latent[:-1],
+                    talker.embed_codes(model.codec_silence_tokens.unsqueeze(0))
+                    + talker.bos_emb,
+                ]
+            )
             ids, chars, lengths = self._char_batch(
                 [self.text_pad_id] * (frames - 1) + [self.text_eos_id]
             )
             mask = torch.zeros(frames, dtype=torch.bool, device=self._device())
-            mask[frames - 2:] = True
+            mask[frames - 2 :] = True
             text = talker.embed_subword(ids, chars, lengths, mask)
             self._warmup_rows = talker.gated_fusion_audio_text(audio, text)
         return self._warmup_rows
@@ -86,7 +100,9 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def _pad_codes(self) -> torch.Tensor:
         return torch.full(
             (1, self.model.talker.num_quantizers),
-            self.speech_pad_id, dtype=torch.long, device=self._device(),
+            self.speech_pad_id,
+            dtype=torch.long,
+            device=self._device(),
         )
 
     def _step_row(self, prev_codes: torch.Tensor, token: int) -> torch.Tensor:
@@ -132,7 +148,9 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             for req in schedule_batch.reqs
         )
 
-    def before_decode(self, forward_batch, schedule_batch, requests, *, is_lookahead=False) -> None:
+    def before_decode(
+        self, forward_batch, schedule_batch, requests, *, is_lookahead=False
+    ) -> None:
         del forward_batch, schedule_batch, is_lookahead
         model = self.model
         rows = []
@@ -142,10 +160,12 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
                 data.pending_text_queue.popleft()
                 data.talker_model_inputs["first_step"] = False
             token = data.pending_text_queue.popleft()
-            rows.append(self._step_row(
-                data.talker_model_inputs["prev_codes"],
-                token,
-            ))
+            rows.append(
+                self._step_row(
+                    data.talker_model_inputs["prev_codes"],
+                    token,
+                )
+            )
         batch = len(rows)
         model._fusion_buffer[:batch] = torch.cat(rows, dim=0)
         model._fusion_mask[:batch] = True
@@ -153,9 +173,12 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def _generate_codes(self, index: int) -> torch.Tensor:
         model = self.model
         return model.talker.generate_codes(
-            model._hidden_out[index:index + 1].float(), model.mog_head,
-            num_iter=NUM_ITER, exponent=self.exponent,
-            top_p=self.top_p, noise_scale=self.noise_scale,
+            model._hidden_out[index : index + 1].float(),
+            model.mog_head,
+            num_iter=NUM_ITER,
+            exponent=self.exponent,
+            top_p=self.top_p,
+            noise_scale=self.noise_scale,
         )
 
     def post_decode(self, result, forward_batch, schedule_batch, requests) -> None:

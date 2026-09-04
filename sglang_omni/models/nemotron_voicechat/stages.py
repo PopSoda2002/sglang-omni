@@ -5,12 +5,14 @@ from pathlib import Path
 
 import torch
 from einops import rearrange
-from transformers import AutoTokenizer
 from torch import nn
+from transformers import AutoTokenizer
 
-from sglang_omni.models.nemotron_voicechat.conformer import AudioPerception
-from sglang_omni.models.nemotron_voicechat.code2wav_stream import NemotronCode2WavScheduler
+from sglang_omni.models.nemotron_voicechat.code2wav_stream import (
+    NemotronCode2WavScheduler,
+)
 from sglang_omni.models.nemotron_voicechat.codec import RVQVAEDecoder
+from sglang_omni.models.nemotron_voicechat.conformer import AudioPerception
 from sglang_omni.models.nemotron_voicechat.engine_builder import (
     NemotronVoiceChatEngineBuilder,
     NemotronVoiceChatTalkerEngineBuilder,
@@ -19,7 +21,12 @@ from sglang_omni.models.nemotron_voicechat.payload_types import (
     OUTPUT_SAMPLE_RATE,
     NemotronVoiceChatState,
 )
-from sglang_omni.models.weight_loader import load_module, load_weights_by_prefix, resolve_dtype, resolve_model_path
+from sglang_omni.models.weight_loader import (
+    load_module,
+    load_weights_by_prefix,
+    resolve_dtype,
+    resolve_model_path,
+)
 from sglang_omni.preprocessing.transcription import resolve_audio_source
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
@@ -66,6 +73,7 @@ def create_preprocessing_executor(model_path: str, **_):
 
     return SimpleScheduler(preprocess)
 
+
 def create_perception_executor(model_path: str, *, dtype=None, device=None):
     device = resolve_device_spec(device)
     module = AudioPerception(_perception_config(model_path))
@@ -84,7 +92,9 @@ def create_perception_executor(model_path: str, *, dtype=None, device=None):
     def encode(payload: StagePayload) -> StagePayload:
         state = NemotronVoiceChatState.from_dict(payload.data)
         waveform = state.waveform
-        waveform_1S = rearrange(waveform, "s -> 1 s") if waveform.ndim == 1 else waveform
+        waveform_1S = (
+            rearrange(waveform, "s -> 1 s") if waveform.ndim == 1 else waveform
+        )
 
         frames = module(waveform_1S.to(device=device, dtype=parameter_dtype))
         assert frames.shape[1] == state.num_frames + 1, (
@@ -98,7 +108,10 @@ def create_perception_executor(model_path: str, *, dtype=None, device=None):
 
     return SimpleScheduler(encode)
 
-def create_thinker_executor(model_path, *, dtype=None, device=None, gpu_id=None, **overrides):
+
+def create_thinker_executor(
+    model_path, *, dtype=None, device=None, gpu_id=None, **overrides
+):
     builder = NemotronVoiceChatEngineBuilder(max_running_requests=1)
     return builder.build(
         model_path,
@@ -108,16 +121,25 @@ def create_thinker_executor(model_path, *, dtype=None, device=None, gpu_id=None,
         server_args_overrides=overrides or None,
     )
 
+
 def _speech_generation_config(model_path: str) -> dict:
     config_path = Path(resolve_model_path(model_path)) / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     return config["model"]["speech_generation"]["model"]
 
 
-def create_talker_executor(model_path, *, dtype=None, device=None, gpu_id=None,
-                           context_length=None, **overrides):
+def create_talker_executor(
+    model_path,
+    *,
+    dtype=None,
+    device=None,
+    gpu_id=None,
+    context_length=None,
+    **overrides,
+):
     builder = NemotronVoiceChatTalkerEngineBuilder(
-        max_running_requests=1, context_length=context_length,
+        max_running_requests=1,
+        context_length=context_length,
     )
     return builder.build(
         model_path,
@@ -159,7 +181,9 @@ def create_code2wav_executor(model_path, *, dtype=None, device=None):
         state = NemotronVoiceChatState.from_dict(payload.data)
         waveform = decoder(state.codes.to(device)).float().cpu()
         payload.data = audio_waveform_payload(
-            waveform, sample_rate=OUTPUT_SAMPLE_RATE, modality="audio",
+            waveform,
+            sample_rate=OUTPUT_SAMPLE_RATE,
+            modality="audio",
             source_hint="NemotronVoiceChat",
         )
         return payload

@@ -1,11 +1,13 @@
 import json
 import pathlib
+
 from huggingface_hub import hf_hub_download
-from transformers import AutoConfig
 from sglang.srt.configs.nemotron_h import NemotronHConfig
+from transformers import AutoConfig
 
 VOICECHAT_MODEL_ARCH_OVERRIDE = "NemotronVoiceChatForCausalLM"
 _voicechat_hf_config_registered = False
+
 
 def _load_backbone_config(repo_id):
     path = hf_hub_download(repo_id, "config.json")
@@ -14,10 +16,18 @@ def _load_backbone_config(repo_id):
         backbone.pop(key, None)
     return backbone
 
+
 class NemotronVoiceChatConfig(NemotronHConfig):
     model_type = "nemotron_voicechat"
 
-    def __init__(self, perception=None, speech_generation=None, duplex=None, text_backbone_path=None, **kwargs):
+    def __init__(
+        self,
+        perception=None,
+        speech_generation=None,
+        duplex=None,
+        text_backbone_path=None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.perception = dict(perception or {})
         self.speech_generation = dict(speech_generation or {})
@@ -49,12 +59,14 @@ class NemotronVoiceChatConfig(NemotronHConfig):
             **kwargs,
         )
 
+
 def register_voicechat_hf_config():
     global _voicechat_hf_config_registered
     if _voicechat_hf_config_registered:
         return
     AutoConfig.register("nemotron_voicechat", NemotronVoiceChatConfig, exist_ok=True)
     _voicechat_hf_config_registered = True
+
 
 __all__ = [
     "VOICECHAT_MODEL_ARCH_OVERRIDE",

@@ -3,16 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sglang.kernels.ops.mamba.triton_ops import initialize_mamba_selective_state_update_backend
+from sglang.kernels.ops.mamba.triton_ops import (
+    initialize_mamba_selective_state_update_backend,
+)
+from transformers import AutoTokenizer
 
 from sglang_omni.models.nemotron_voicechat.hf_config import (
     VOICECHAT_MODEL_ARCH_OVERRIDE,
     NemotronVoiceChatConfig,
     register_voicechat_hf_config,
 )
-from sglang_omni.models.nemotron_voicechat.model_runner import NemotronVoiceChatModelRunner
-from transformers import AutoTokenizer
-
+from sglang_omni.models.nemotron_voicechat.model_runner import (
+    NemotronVoiceChatModelRunner,
+)
 from sglang_omni.models.nemotron_voicechat.request_builders import (
     SYSTEM_PROMPT,
     apply_talker_result,
@@ -26,10 +29,12 @@ from sglang_omni.models.nemotron_voicechat.talker import TALKER_ARCH
 from sglang_omni.models.nemotron_voicechat.talker_model_runner import (
     NemotronVoiceChatTalkerModelRunner,
 )
-from sglang_omni.models.nemotron_voicechat.talker_scheduler import NemotronTalkerScheduler
-from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+from sglang_omni.models.nemotron_voicechat.talker_scheduler import (
+    NemotronTalkerScheduler,
+)
 from sglang_omni.models.weight_loader import resolve_model_path
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 
 CACHE_ROOT = Path.home() / ".cache" / "sglang-omni"
 TALKER_SPEAKER = "Aria"
@@ -48,7 +53,9 @@ def _shim_dir(name: str, source: Path) -> Path:
 
 
 def _talker_config(source: Path) -> dict:
-    speech = json.loads((source / "config.json").read_text())["model"]["speech_generation"]["model"]
+    speech = json.loads((source / "config.json").read_text())["model"][
+        "speech_generation"
+    ]["model"]
     backbone = speech["tts_config"]["backbone_config"]
     return {
         "model_type": "gemma3_text",
@@ -68,8 +75,12 @@ def _talker_config(source: Path) -> dict:
             "codec_config": speech["codec_config"],
             "inference_top_p_or_k": speech["inference_top_p_or_k"],
             "inference_noise_scale": speech["inference_noise_scale"],
-            "inference_force_speech_silence_on_eos": speech["inference_force_speech_silence_on_eos"],
-            "tokenizer_name": speech["tts_config"]["cas_config"]["pretrained_tokenizer_name"],
+            "inference_force_speech_silence_on_eos": speech[
+                "inference_force_speech_silence_on_eos"
+            ],
+            "tokenizer_name": speech["tts_config"]["cas_config"][
+                "pretrained_tokenizer_name"
+            ],
             "bos_token": speech.get("bos_token"),
             "eos_token": speech.get("eos_token"),
             "pad_token": speech.get("pad_token"),
@@ -104,7 +115,9 @@ class _VoiceChatEngineBuilder(TtsEngineBuilder):
         del model_worker, checkpoint_dir, device, gpu_id, server_args
 
     def make_scheduler(self, **kwargs):
-        extra = kwargs.pop("extra_scheduler_kwargs", None) or self.extra_scheduler_kwargs()
+        extra = (
+            kwargs.pop("extra_scheduler_kwargs", None) or self.extra_scheduler_kwargs()
+        )
         return self.scheduler_class(
             tp_worker=kwargs.pop("model_worker"),
             abort_callback=self.make_abort_callback(),
@@ -128,7 +141,9 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
         source = Path(resolve_model_path(model_path))
         self._source = source
         shim = _shim_dir("voicechat", source)
-        config = NemotronVoiceChatConfig.from_dict(json.loads((source / "config.json").read_text()))
+        config = NemotronVoiceChatConfig.from_dict(
+            json.loads((source / "config.json").read_text())
+        )
         (shim / "config.json").write_text(config.to_json_string())
         return str(shim)
 
@@ -139,7 +154,9 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
         three are easy to confuse here, since this tokenizer's padding token is
         the frame-locked silence marker rather than anything called "pad".
         """
-        stt = json.loads((self._source / "config.json").read_text())["model"]["stt"]["model"]
+        stt = json.loads((self._source / "config.json").read_text())["model"]["stt"][
+            "model"
+        ]
         tokenizer = AutoTokenizer.from_pretrained(
             stt.get("pretrained_llm", "nvidia/NVIDIA-Nemotron-Nano-9B-v2")
         )
@@ -169,7 +186,9 @@ class NemotronVoiceChatEngineBuilder(_VoiceChatEngineBuilder):
 
         def build(payload):
             return build_thinker_request(
-                payload, vocab_size=vocab_size, prompt_token_ids=prompt_token_ids,
+                payload,
+                vocab_size=vocab_size,
+                prompt_token_ids=prompt_token_ids,
                 pad_token_id=pad_token_id,
             )
 
@@ -184,8 +203,9 @@ class NemotronVoiceChatTalkerEngineBuilder(_VoiceChatEngineBuilder):
     context_length = 4096
     scheduler_class = NemotronTalkerScheduler
 
-    def __init__(self, *, max_running_requests: int = 1,
-                 context_length: int | None = None) -> None:
+    def __init__(
+        self, *, max_running_requests: int = 1, context_length: int | None = None
+    ) -> None:
         super().__init__(max_running_requests=max_running_requests)
         self.model_arch_override = TALKER_ARCH
         if context_length is not None:
@@ -210,7 +230,9 @@ class NemotronVoiceChatTalkerEngineBuilder(_VoiceChatEngineBuilder):
         prompt_frames = int(model.audio_prompt_latent.shape[0])
 
         def build(payload):
-            return build_talker_request(payload, vocab_size=vocab_size, prompt_frames=prompt_frames)
+            return build_talker_request(
+                payload, vocab_size=vocab_size, prompt_frames=prompt_frames
+            )
 
         return build, apply_talker_result
 

@@ -29,10 +29,14 @@ OUTPUT_SAMPLE_RATE = 22_050
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", required=True, help="checkpoint directory")
-    parser.add_argument("--audio", required=True, help="the user's turn, any sample rate")
+    parser.add_argument(
+        "--audio", required=True, help="the user's turn, any sample rate"
+    )
     parser.add_argument("--out", default="reply.wav", help="where to write the reply")
     parser.add_argument(
-        "--startup-timeout", type=float, default=900.0,
+        "--startup-timeout",
+        type=float,
+        default=900.0,
         help="seconds to wait for the stages to load",
     )
     return parser.parse_args()
