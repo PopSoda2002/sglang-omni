@@ -64,3 +64,6 @@ target/
 # CPU installer lock/backup
 .pyproject.cpu.lock
 .pyproject.cpu.bak
+
+# Local VoiceChat reference checkpoint (~42 GB)
+.voicechat-ref/
