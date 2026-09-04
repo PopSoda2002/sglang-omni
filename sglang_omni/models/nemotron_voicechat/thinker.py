@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import torch
-from torch import nn
-
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.models.nemotron_h import NemotronHForCausalLM
-from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import add_prefix
-from sglang.srt.server_args import get_global_server_args
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.models.nemotron_h import NemotronHForCausalLM
+from sglang.srt.server_args import get_global_server_args
+from sglang.srt.utils import add_prefix
+from torch import nn
 
 from sglang_omni.models.nemotron_voicechat.fusion import AddFusion
 
@@ -19,10 +18,13 @@ BACKBONE_RENAMES_MAP = (
     ("stt_model.lm_head.", "lm_head."),
 )
 
+
 class NemotronVoiceChatForCausalLM(nn.Module):
-    def  __init__(self, *, config, quant_config=None, prefix=""):
-        super().__init__() 
-        self.llm = NemotronHForCausalLM(config=config, quant_config=quant_config, prefix=add_prefix("llm", prefix))
+    def __init__(self, *, config, quant_config=None, prefix=""):
+        super().__init__()
+        self.llm = NemotronHForCausalLM(
+            config=config, quant_config=quant_config, prefix=add_prefix("llm", prefix)
+        )
         self.function_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
@@ -33,15 +35,24 @@ class NemotronVoiceChatForCausalLM(nn.Module):
         embedding = self.llm.get_input_embeddings().weight
         max_batch = get_global_server_args().max_running_requests
         self._fusion_buffer = torch.zeros(
-            max_batch, config.hidden_size, device=embedding.device, dtype=embedding.dtype
+            max_batch,
+            config.hidden_size,
+            device=embedding.device,
+            dtype=embedding.dtype,
         )
-        self._fusion_mask = torch.zeros(max_batch, dtype=torch.bool, device=embedding.device)
-        self._function_ids = torch.zeros(max_batch, dtype=torch.long, device=embedding.device)
+        self._fusion_mask = torch.zeros(
+            max_batch, dtype=torch.bool, device=embedding.device
+        )
+        self._function_ids = torch.zeros(
+            max_batch, dtype=torch.long, device=embedding.device
+        )
 
     def get_input_embeddings(self) -> nn.Module:
         return self.llm.get_input_embeddings()
 
-    def forward(self, input_ids, positions, forward_batch, input_embeds=None, **omni_kwargs):
+    def forward(
+        self, input_ids, positions, forward_batch, input_embeds=None, **omni_kwargs
+    ):
         del omni_kwargs
         if input_embeds is None:
             input_embeds = self.llm.get_input_embeddings()(input_ids)
@@ -54,7 +65,7 @@ class NemotronVoiceChatForCausalLM(nn.Module):
             )
             self._fusion_mask[:batch] = False
         hidden = self.llm.model.forward(
-          input_ids, positions, forward_batch, None, input_embeds
+            input_ids, positions, forward_batch, None, input_embeds
         )
         self._sample_function_ids(hidden, forward_batch)
         return self.llm.logits_processor(
@@ -85,5 +96,6 @@ class NemotronVoiceChatForCausalLM(nn.Module):
     def load_weights(self, weights):
         parameters = dict(self.named_parameters())
         self.llm.load_weights(self._backbone_weights_stream(parameters, weights))
+
 
 EntryClass = NemotronVoiceChatForCausalLM

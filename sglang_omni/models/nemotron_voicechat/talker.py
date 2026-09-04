@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import torch
-from torch import nn
-from torch.nn import functional
-
 from sglang.srt.models.gemma3_causal import Gemma3ForCausalLM
 from sglang.srt.server_args import get_global_server_args
+from torch import nn
+from torch.nn import functional
 from transformers import T5GemmaConfig, T5GemmaEncoderModel, T5GemmaModuleConfig
 
 from sglang_omni.models.nemotron_voicechat.mog_head import MoGHead, RMSNorm
@@ -16,11 +15,15 @@ class SubwordFlagEmbedding(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
         self.register_buffer("pad_tensor", torch.tensor(vocab_size, dtype=torch.long))
-        self.register_buffer("is_continuation", torch.zeros(vocab_size + 1, dtype=torch.long))
+        self.register_buffer(
+            "is_continuation", torch.zeros(vocab_size + 1, dtype=torch.long)
+        )
         self.cont_emb = nn.Embedding(2, hidden_size)
 
     def forward(self, embeds_TD, token_ids_T):
-        safe_T = torch.where(token_ids_T >= self.vocab_size, self.pad_tensor, token_ids_T)
+        safe_T = torch.where(
+            token_ids_T >= self.vocab_size, self.pad_tensor, token_ids_T
+        )
         return embeds_TD + self.cont_emb(self.is_continuation[safe_T])
 
 
@@ -33,7 +36,9 @@ class BosEosEmbedding(nn.Module):
         self.special_emb = nn.Embedding(3, hidden_size)
 
     def forward(self, embeds_TD, token_ids_T):
-        safe_T = torch.where(token_ids_T >= self.vocab_size, self.pad_tensor, token_ids_T)
+        safe_T = torch.where(
+            token_ids_T >= self.vocab_size, self.pad_tensor, token_ids_T
+        )
         return embeds_TD + self.special_emb(self.special_flags[safe_T])
 
 
@@ -77,7 +82,9 @@ class TalkerEmbedding(nn.Module):
         hidden_TCD = self.backbone(
             inputs_embeds=char_embeds_TCD, attention_mask=valid_TC.long()
         ).last_hidden_state
-        pooled_TD = (hidden_TCD * valid_TC[..., None]).sum(1) / char_lengths_T[:, None].clamp_min(1)
+        pooled_TD = (hidden_TCD * valid_TC[..., None]).sum(1) / char_lengths_T[
+            :, None
+        ].clamp_min(1)
         embeds_TD = self.proj_embedding(pooled_TD)
         if pooled_mask_T is not None:
             embeds_TD = embeds_TD * pooled_mask_T[:, None]
@@ -107,10 +114,17 @@ class EarTtsTalker(nn.Module):
         self.gated_fusion_audio_text = GatedFusion(hidden_size, self.num_quantizers)
         self.bos_emb = nn.Parameter(torch.empty(hidden_size))
         self.null_emb = nn.Parameter(torch.empty(hidden_size))
-        self.audio_prompt_projection_W = nn.Parameter(torch.empty(hidden_size, hidden_size))
-        self.register_buffer("rvq_embs", torch.empty(
-            self.num_quantizers, int(config["codebook_size"]), int(config["latent_size"])
-        ))
+        self.audio_prompt_projection_W = nn.Parameter(
+            torch.empty(hidden_size, hidden_size)
+        )
+        self.register_buffer(
+            "rvq_embs",
+            torch.empty(
+                self.num_quantizers,
+                int(config["codebook_size"]),
+                int(config["latent_size"]),
+            ),
+        )
         self.embed_code = nn.Linear(int(config["latent_size"]), hidden_size, bias=False)
 
     def embed_codes(self, codes_TQ):
@@ -126,9 +140,17 @@ class EarTtsTalker(nn.Module):
             codes_TQ[:, level] = index_T
         return codes_TQ
 
-    def generate_codes(self, hidden_TD, mog_head, *, num_iter: int, exponent: float,
-                       top_p: float | None = None, noise_scale: float = 1.0,
-                       guidance_scale: float = 0.0):
+    def generate_codes(
+        self,
+        hidden_TD,
+        mog_head,
+        *,
+        num_iter: int,
+        exponent: float,
+        top_p: float | None = None,
+        noise_scale: float = 1.0,
+        guidance_scale: float = 0.0,
+    ):
         if guidance_scale > 0:
             hidden_TD, uncond_TD = hidden_TD.chunk(2)
         frames = hidden_TD.shape[0]
@@ -151,7 +173,10 @@ class EarTtsTalker(nn.Module):
             mean_TD, log_std_T1 = mog_head.infer(
                 fed_TD, guidance_scale=guidance_scale, top_p=top_p
             )
-            sampled_TD = mean_TD + torch.exp(log_std_T1) * torch.randn_like(mean_TD) * noise_scale
+            sampled_TD = (
+                mean_TD
+                + torch.exp(log_std_T1) * torch.randn_like(mean_TD) * noise_scale
+            )
             codes_TQ = self.quantise(sampled_TD, codes_TQ, assigned, count)
             assigned += count
         return codes_TQ
@@ -159,13 +184,15 @@ class EarTtsTalker(nn.Module):
     def _depth_sum(self, codes_TQ, levels: int):
         if levels == 0:
             return torch.zeros(
-                codes_TQ.shape[0], self.rvq_embs.shape[-1],
-                device=codes_TQ.device, dtype=self.embed_code.weight.dtype,
+                codes_TQ.shape[0],
+                self.rvq_embs.shape[-1],
+                device=codes_TQ.device,
+                dtype=self.embed_code.weight.dtype,
             )
         padded_QCD = functional.pad(self.rvq_embs, (0, 0, 0, 1))
-        return torch.stack(
-            [padded_QCD[q][codes_TQ[:, q]] for q in range(levels)]
-        ).sum(0)
+        return torch.stack([padded_QCD[q][codes_TQ[:, q]] for q in range(levels)]).sum(
+            0
+        )
 
 
 TALKER_ARCH = "NemotronVoiceChatTalker"
@@ -191,14 +218,16 @@ class NemotronVoiceChatTalker(nn.Module):
             char_encoder_config=tts_config["cas_config"]["backbone_config"],
         )
         self.talker = EarTtsTalker(talker_config)
-        self.mog_head = MoGHead(dict(
-            hidden_size=talker_config["hidden_size"],
-            intermediate_size=tts_config["backbone_config"]["intermediate_size"],
-            num_layers=3,
-            num_predictions=talker_config["codebook_size"],
-            out_size=talker_config["latent_size"],
-            low_rank=64,
-        ))
+        self.mog_head = MoGHead(
+            dict(
+                hidden_size=talker_config["hidden_size"],
+                intermediate_size=tts_config["backbone_config"]["intermediate_size"],
+                num_layers=3,
+                num_predictions=talker_config["codebook_size"],
+                out_size=talker_config["latent_size"],
+                low_rank=64,
+            )
+        )
         self.register_buffer(
             "codec_silence_tokens",
             torch.zeros(talker_config["num_quantizers"], dtype=torch.long),
@@ -211,9 +240,13 @@ class NemotronVoiceChatTalker(nn.Module):
         max_batch = get_global_server_args().max_running_requests
         embed_dtype = torch.get_default_dtype()
         device = "cuda"
-        self._fusion_buffer = torch.zeros(max_batch, hidden_size, dtype=embed_dtype, device=device)
+        self._fusion_buffer = torch.zeros(
+            max_batch, hidden_size, dtype=embed_dtype, device=device
+        )
         self._fusion_mask = torch.zeros(max_batch, dtype=torch.bool, device=device)
-        self._hidden_out = torch.zeros(max_batch, hidden_size, dtype=embed_dtype, device=device)
+        self._hidden_out = torch.zeros(
+            max_batch, hidden_size, dtype=embed_dtype, device=device
+        )
 
     def get_attention_sliding_window_size(self):
         return self.llm.get_attention_sliding_window_size()
@@ -221,9 +254,9 @@ class NemotronVoiceChatTalker(nn.Module):
     def forward(self, input_ids, positions, forward_batch, input_embeds=None, **_):
         if input_embeds is None:
             batch = input_ids.shape[0]
-            assert bool(self._fusion_mask[:batch].all()), (
-                "talker decode step reached the model without fused inputs"
-            )
+            assert bool(
+                self._fusion_mask[:batch].all()
+            ), "talker decode step reached the model without fused inputs"
             input_embeds = self._fusion_buffer[:batch]
             self._fusion_mask[:batch] = False
         hidden = self.llm.model(input_ids, positions, forward_batch, input_embeds)
@@ -246,13 +279,17 @@ class NemotronVoiceChatTalker(nn.Module):
             if name == "tts_model.codec_silence_tokens":
                 self.codec_silence_tokens.copy_(tensor)
             elif name == prompt_key:
-                self.audio_prompt_latent.copy_(tensor[0].to(self.audio_prompt_latent.dtype))
+                self.audio_prompt_latent.copy_(
+                    tensor[0].to(self.audio_prompt_latent.dtype)
+                )
             elif name.startswith(TALKER_PREFIX):
-                local = name[len(TALKER_PREFIX):]
+                local = name[len(TALKER_PREFIX) :]
                 if local.startswith("backbone."):
-                    backbone_weights.append(("model." + local[len("backbone."):], tensor))
+                    backbone_weights.append(
+                        ("model." + local[len("backbone.") :], tensor)
+                    )
                 elif local.startswith("mog_head."):
-                    mog_state[local[len("mog_head."):]] = tensor
+                    mog_state[local[len("mog_head.") :]] = tensor
                 else:
                     talker_state[local] = tensor
         self.llm.load_weights(backbone_weights)

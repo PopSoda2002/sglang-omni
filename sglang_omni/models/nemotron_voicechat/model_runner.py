@@ -9,6 +9,7 @@ from sglang_omni.model_runner.prefill_inputs import (
 )
 from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
 
+
 class NemotronVoiceChatModelRunner(ModelRunner):
     def before_prefill(self, forward_batch, schedule_batch, requests) -> None:
         del schedule_batch
@@ -79,7 +80,9 @@ class NemotronVoiceChatModelRunner(ModelRunner):
     def _record_function_ids(self, requests) -> None:
         sampled = self.model._function_ids[: len(requests)].tolist()
         for request, token in zip(requests, sampled):
-            request.data.extra_model_outputs.setdefault("function_ids", []).append(token)
+            request.data.extra_model_outputs.setdefault("function_ids", []).append(
+                token
+            )
 
     @staticmethod
     def _record_stream_tokens(result, requests) -> None:

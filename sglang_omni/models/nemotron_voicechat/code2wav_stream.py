@@ -4,8 +4,8 @@ import torch
 
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
-from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.scheduling.streaming_simple_scheduler import StreamingSimpleScheduler
+from sglang_omni.utils.audio_payload import audio_waveform_payload
 
 OUTPUT_SAMPLE_RATE = 22_050
 DECODE_WINDOW_FRAMES = 16
@@ -38,7 +38,7 @@ class StreamingCodec:
         audio = self.decoder(torch.stack(self.codes_rows[first:]))
         available = frames * samples_per_frame - (0 if final else TAIL_HOLDBACK_SAMPLES)
         start = self.emitted_samples - first * samples_per_frame
-        fresh = audio[start: available - first * samples_per_frame].float().cpu()
+        fresh = audio[start : available - first * samples_per_frame].float().cpu()
         self.emitted_samples = available
         return fresh
 
@@ -99,15 +99,19 @@ class NemotronCode2WavScheduler(StreamingSimpleScheduler):
             tail = state.codec.flush()
             if tail.numel():
                 state.audio_parts.append(tail)
-                messages.append(OutgoingMessage(
-                    request_id=request_id,
-                    type="stream",
-                    data=audio_waveform_payload(
-                        tail, sample_rate=OUTPUT_SAMPLE_RATE, modality="audio",
-                        source_hint="NemotronVoiceChat",
-                    ),
-                    metadata={"modality": "audio"},
-                ))
+                messages.append(
+                    OutgoingMessage(
+                        request_id=request_id,
+                        type="stream",
+                        data=audio_waveform_payload(
+                            tail,
+                            sample_rate=OUTPUT_SAMPLE_RATE,
+                            modality="audio",
+                            source_hint="NemotronVoiceChat",
+                        ),
+                        metadata={"modality": "audio"},
+                    )
+                )
         waveform = torch.cat(state.audio_parts) if state.audio_parts else torch.zeros(0)
         return messages + [
             OutgoingMessage(
@@ -117,7 +121,9 @@ class NemotronCode2WavScheduler(StreamingSimpleScheduler):
                     request_id=request_id,
                     request=self._stream_payloads[request_id].request,
                     data=audio_waveform_payload(
-                        waveform, sample_rate=OUTPUT_SAMPLE_RATE, modality="audio",
+                        waveform,
+                        sample_rate=OUTPUT_SAMPLE_RATE,
+                        modality="audio",
                         source_hint="NemotronVoiceChat",
                     ),
                 ),

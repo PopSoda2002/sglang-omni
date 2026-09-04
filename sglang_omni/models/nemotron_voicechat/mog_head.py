@@ -8,6 +8,7 @@ from torch.nn import functional
 RMS_NORM_EPS = 1e-6
 MIN_LOG_STD = -4.0
 
+
 class RMSNorm(nn.Module):
     # Gemma's variant: the stored weight is an offset from 1.0, not the scale.
     def __init__(self, dim: int) -> None:
@@ -16,8 +17,11 @@ class RMSNorm(nn.Module):
 
     def forward(self, hidden_TD):
         hidden = hidden_TD.float()
-        hidden = hidden * torch.rsqrt(hidden.pow(2).mean(-1, keepdim=True) + RMS_NORM_EPS)
+        hidden = hidden * torch.rsqrt(
+            hidden.pow(2).mean(-1, keepdim=True) + RMS_NORM_EPS
+        )
         return (hidden * (1.0 + self.weight.float())).type_as(hidden_TD)
+
 
 class GatedMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
@@ -28,7 +32,10 @@ class GatedMLP(nn.Module):
         self.act_fn = nn.GELU(approximate="tanh")
 
     def forward(self, hidden_TD):
-        return self.down_proj(self.act_fn(self.gate_proj(hidden_TD)) * self.up_proj(hidden_TD))
+        return self.down_proj(
+            self.act_fn(self.gate_proj(hidden_TD)) * self.up_proj(hidden_TD)
+        )
+
 
 class MLPLayer(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
@@ -62,12 +69,18 @@ class MoGHead(nn.Module):
             RMSNorm(hidden_size),
         )
         self.proj_logits = nn.Linear(hidden_size, self.num_predictions, bias=False)
-        self.proj_mus = nn.Linear(hidden_size, self.num_predictions * self.low_rank, bias=False)
+        self.proj_mus = nn.Linear(
+            hidden_size, self.num_predictions * self.low_rank, bias=False
+        )
         self.proj_logs = nn.Linear(hidden_size, 1, bias=False)
         self.proj_else = nn.Linear(hidden_size, self.out_size, bias=False)
-        self.low_mat = nn.Parameter(torch.empty(self.num_predictions, self.out_size, self.low_rank))
+        self.low_mat = nn.Parameter(
+            torch.empty(self.num_predictions, self.out_size, self.low_rank)
+        )
 
-    def infer(self, hidden_TD, *, guidance_scale: float = 0.0, top_p: float | None = None):
+    def infer(
+        self, hidden_TD, *, guidance_scale: float = 0.0, top_p: float | None = None
+    ):
         """Sample one latent per position. Under guidance the conditioned and
         unconditioned halves arrive stacked along the batch axis."""
         hidden_TD = self.mlp_stack(hidden_TD)
@@ -81,7 +94,9 @@ class MoGHead(nn.Module):
         # Gumbel-max over the log-softmax draws one component per position.
         with torch.autocast(device_type=hidden_TD.device.type, enabled=False):
             gumbel = -torch.log(-torch.log(torch.rand_like(logits_TN.float())))
-            component_T = (functional.log_softmax(logits_TN.float(), dim=-1) + gumbel).argmax(-1)
+            component_T = (
+                functional.log_softmax(logits_TN.float(), dim=-1) + gumbel
+            ).argmax(-1)
 
         coefficient_TR = self._component_matmul(
             hidden_TD, self.proj_mus.weight, component_T, self.low_rank

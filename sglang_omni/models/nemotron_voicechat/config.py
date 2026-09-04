@@ -1,5 +1,6 @@
-from pydantic import Field
 from typing import ClassVar
+
+from pydantic import Field
 
 from sglang_omni.config import (
     EngineStageConfig,
@@ -86,6 +87,7 @@ class NemotronVoiceChatPipelineConfig(PipelineConfig):
         "thinker": EngineStageConfig,
         "talker": EngineStageConfig,
     }
+
     model_path: str
     stages: list[StageConfig] = Field(default_factory=nemotron_voicechat_stages_factory)
 
