@@ -104,7 +104,8 @@ def build_talker_request(
     return _ar_request(
         payload,
         input_ids=[TALKER_PLACEHOLDER_ID] * prompt_frames,
-        max_new_tokens=num_frames,
+        # One more than the frames: the prefill's own step does not emit codes.
+        max_new_tokens=num_frames + 1,
         vocab_size=vocab_size,
     )
 

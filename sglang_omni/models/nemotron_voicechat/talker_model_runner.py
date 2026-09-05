@@ -126,21 +126,12 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         del result, forward_batch, schedule_batch
         for request in requests:
             inputs = request.data.talker_model_inputs
-            first_code = torch.zeros(
-                self.model.talker.num_quantizers,
-                dtype=torch.long,
-                device=self._device(),
-            )
-            inputs["codes_rows"] = [first_code]
+            inputs["codes_rows"] = []
             inputs["prev_codes"] = self._pad_codes()
-            inputs["first_step"] = True
-            inputs["stream_chunk"] = first_code.unsqueeze(0).cpu()
 
     def is_decode_batch_ready(self, schedule_batch) -> bool:
         return all(
-            len(req._omni_data.pending_text_queue)
-            >= (2 if req._omni_data.talker_model_inputs.get("first_step") else 1)
-            for req in schedule_batch.reqs
+            len(req._omni_data.pending_text_queue) > 0 for req in schedule_batch.reqs
         )
 
     def before_decode(
@@ -151,9 +142,6 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         rows = []
         for request in requests:
             data = request.data
-            if data.talker_model_inputs.get("first_step"):
-                data.pending_text_queue.popleft()
-                data.talker_model_inputs["first_step"] = False
             token = data.pending_text_queue.popleft()
             rows.append(
                 self._step_row(
